@@ -94,6 +94,7 @@ class SkillRuntime:
         run_id: str,
         conversation_id: str,
         content: str,
+        allow_retry: bool = False,
     ) -> SkillExecutionResult:
         result = self.invoke(
             user_id=user_id,
@@ -102,6 +103,7 @@ class SkillRuntime:
             skill_name="work-capture",
             input_payload={"content": content},
             step_key="work-capture",
+            allow_retry=allow_retry,
         )
         if result.envelope is None:
             raise SkillOutputValidationError()
@@ -116,6 +118,7 @@ class SkillRuntime:
         skill_name: str,
         input_payload: dict[str, Any],
         step_key: str | None = None,
+        allow_retry: bool = False,
     ) -> SkillExecutionResult:
         definition = self.registry.require_enabled(skill_name)
         try:
@@ -161,6 +164,7 @@ class SkillRuntime:
             max_iterations=definition.manifest.max_iterations,
             input_digest=input_digest,
             context_digest=context.digest,
+            allow_retry=allow_retry,
         )
         self.repository.append_skill_event(
             user_id=user_id,

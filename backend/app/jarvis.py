@@ -162,6 +162,7 @@ class JarvisOrchestrator:
                         run_id=intake.run_id,
                         conversation_id=intake.conversation_id,
                         content=request.content,
+                        allow_retry=intake.retry_skill,
                     )
                     envelope = skill_result.envelope
                     provider_duration_ms = skill_result.duration_ms
