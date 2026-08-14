@@ -1,0 +1,94 @@
+name: personal-ai-work-manager
+
+services:
+  backend:
+    build:
+      context: ./backend
+    environment:
+      EXTRACTION_PROVIDER: ${EXTRACTION_PROVIDER:-local}
+      LOCAL_LLM_BASE_URL: ${LOCAL_LLM_BASE_URL:-http://host.docker.internal:11434}
+      LOCAL_LLM_MODEL: ${LOCAL_LLM_MODEL:-qwen3:4b}
+      LOCAL_LLM_TIMEOUT_SECONDS: ${LOCAL_LLM_TIMEOUT_SECONDS:-30}
+      LOCAL_LLM_CONTEXT_LENGTH: ${LOCAL_LLM_CONTEXT_LENGTH:-16384}
+      LOCAL_LLM_MAX_OUTPUT_TOKENS: ${LOCAL_LLM_MAX_OUTPUT_TOKENS:-4096}
+      EXTRACTION_MAX_CONCURRENT: ${EXTRACTION_MAX_CONCURRENT:-6}
+      EXTRACTION_CONCURRENCY_WAIT_SECONDS: ${EXTRACTION_CONCURRENCY_WAIT_SECONDS:-10}
+      EXTRACTION_API_BASE_URL: ${EXTRACTION_API_BASE_URL:-https://api.openai.com/v1}
+      EXTRACTION_API_KEY: ${EXTRACTION_API_KEY:-}
+      EXTRACTION_API_MODEL: ${EXTRACTION_API_MODEL:-}
+      EXTRACTION_API_TIMEOUT_SECONDS: ${EXTRACTION_API_TIMEOUT_SECONDS:-60}
+      PHASE2_SKILL_RUNTIME_ENABLED: ${PHASE2_SKILL_RUNTIME_ENABLED:-true}
+      SKILL_AUTO_ENABLE: ${SKILL_AUTO_ENABLE:-work-capture}
+      SKILLS_ROOT: ${SKILLS_ROOT:-/app/skills}
+      TTS_ENABLED: ${TTS_ENABLED:-true}
+      TTS_BRIDGE_URL: ${TTS_BRIDGE_URL:-http://tts:8765}
+      TTS_PUBLIC_BASE_URL: ${TTS_PUBLIC_BASE_URL:-http://127.0.0.1:8766}
+      TTS_PROVIDER_NAME: ${TTS_PROVIDER_NAME:-local-piper}
+      TTS_MODEL_NAME: ${TTS_MODEL_NAME:-ko_KR-kss-medium}
+      TTS_TIMEOUT_SECONDS: ${TTS_TIMEOUT_SECONDS:-30}
+      PERSONAL_AI_DB_PATH: /app/data/personal_ai.db
+      DASHBOARD_ALLOWED_ORIGINS: ${DASHBOARD_ALLOWED_ORIGINS:-http://localhost:3100,http://127.0.0.1:3100,http://localhost:3001,http://127.0.0.1:3001,http://localhost:3000,http://127.0.0.1:3000}
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    volumes:
+      - ./backend/data:/app/data
+    ports:
+      - ${BACKEND_BIND:-0.0.0.0}:${BACKEND_PORT:-8100}:8000
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+  tts:
+    build:
+      context: ./tts/piper-server
+    environment:
+      PIPER_MODEL_DIR: /models
+      PIPER_OUTPUT_DIR: /data/audio
+      PIPER_VOICE: ${PIPER_VOICE:-ko_KR-kss-medium}
+      PIPER_AUTO_DOWNLOAD: ${PIPER_AUTO_DOWNLOAD:-true}
+      TTS_ALLOWED_ORIGINS: ${TTS_ALLOWED_ORIGINS:-http://localhost:3100,http://127.0.0.1:3100,http://localhost:3001,http://127.0.0.1:3001}
+    volumes:
+      - piper_models:/models
+      - piper_audio:/data/audio
+    ports:
+      - ${TTS_BIND:-0.0.0.0}:${TTS_PORT:-8766}:8765
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request,sys; r=urllib.request.urlopen('http://127.0.0.1:8765/api/health', timeout=2); sys.exit(0 if r.status == 200 else 1)"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+    stop_grace_period: 20s
+
+  dashboard:
+    build:
+      context: ./dashboard
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-}
+        NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:3100}
+    environment:
+      BACKEND_INTERNAL_URL: ${BACKEND_INTERNAL_URL:-http://backend:8000}
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - ${DASHBOARD_BIND:-0.0.0.0}:${DASHBOARD_PORT:-3100}:3000
+      - ${DASHBOARD_BIND:-0.0.0.0}:3001:3000
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3000').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+    stop_grace_period: 20s
+
+volumes:
+  piper_models:
+  piper_audio:

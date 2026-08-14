@@ -1,0 +1,10 @@
+.git
+node_modules
+dist
+.next
+.vinext
+.wrangler
+.DS_Store
+.env
+.env.*
+tests

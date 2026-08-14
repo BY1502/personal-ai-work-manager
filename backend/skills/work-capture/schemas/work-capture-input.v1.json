@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "work-capture-input.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["content", "context_package"],
+  "properties": {
+    "content": {"type": "string", "minLength": 1},
+    "context_package": {"type": "object"}
+  }
+}

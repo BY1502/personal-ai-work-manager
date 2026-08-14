@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#173d31" />
+    <title>BY · 연결 대기 중</title>
+    <style>
+      :root { color-scheme: light; font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", sans-serif; }
+      body { align-items: center; background: #f1f2ed; color: #1e2420; display: flex; justify-content: center; min-height: 100vh; margin: 0; }
+      main { background: #fbfaf7; border: 1px solid #dedfd8; border-radius: 24px; box-shadow: 0 18px 45px rgba(39,49,42,.08); max-width: 420px; padding: 36px; text-align: center; }
+      .mark { align-items: center; background: #173d31; border-radius: 14px; color: #c9ec79; display: inline-flex; font-weight: 800; height: 48px; justify-content: center; letter-spacing: .08em; width: 48px; }
+      h1 { font-size: 22px; margin: 22px 0 10px; }
+      p { color: #5e6761; line-height: 1.65; margin: 0; }
+      button { background: #173d31; border: 0; border-radius: 12px; color: #c9ec79; cursor: pointer; font: inherit; font-weight: 700; margin-top: 24px; padding: 12px 18px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <span class="mark">BY</span>
+      <h1>BY 서버에 연결할 수 없습니다</h1>
+      <p>Docker가 시작되는 동안 잠시 기다리거나 서버를 다시 시작한 뒤 재시도해주세요.</p>
+      <button type="button" onclick="location.reload()">다시 연결</button>
+    </main>
+  </body>
+</html>

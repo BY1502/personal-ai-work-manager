@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "work-fact-draft.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "intent", "fact_groups", "query"],
+  "properties": {
+    "schema_version": {"const": "work-fact-draft.v1"},
+    "intent": {"enum": ["CAPTURE_WORK", "QUERY_WORK", "GENERATE_REPORT", "GENERAL"]},
+    "fact_groups": {"type": "array"},
+    "query": {"type": ["object", "null"]}
+  }
+}

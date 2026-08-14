@@ -1,0 +1,26 @@
+{
+  "name": "BY · 나의 AI 업무 매니저",
+  "short_name": "BY",
+  "description": "대화로 업무를 기록하고 현재 업무 흐름을 확인하는 개인 AI 업무 매니저",
+  "lang": "ko-KR",
+  "start_url": "/personal-ai-work-manager/dashboard",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#f1f2ed",
+  "theme_color": "#173d31",
+  "icons": [
+    {
+      "src": "/by-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/by-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

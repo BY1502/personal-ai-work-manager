@@ -1,0 +1,33 @@
+# Local runtime data
+backend/data/*.db
+backend/data/*.db-*
+backend/data/*.lock
+backend/.env
+dashboard/.env
+.env
+
+# Python
+backend/.venv/
+backend/**/__pycache__/
+backend/.pytest_cache/
+backend/*.egg-info/
+*.py[cod]
+
+# Node / Next / build output
+dashboard/node_modules/
+dashboard/.next/
+dashboard/dist/
+dashboard/.vinxi/
+dashboard/coverage/
+dashboard/npm-debug.log*
+dashboard/pnpm-debug.log*
+
+# Local/editor files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Downloaded TTS model/audio data
+tts/models/
+tts/audio/
