@@ -30,8 +30,14 @@ staged_app="$staging_dir/BY.app"
 /usr/bin/ditto "$SOURCE_APP" "$staged_app"
 /bin/mkdir -p "$staged_app/Contents/Resources"
 printf '%s\n' "$PROJECT_DIR" > "$staged_app/Contents/Resources/project-path"
+/bin/cp "$SOURCE_APP/Contents/MacOS/BY" "$staged_app/Contents/Resources/launcher.sh"
+/bin/chmod +x "$staged_app/Contents/Resources/launcher.sh"
 /usr/bin/ditto "$PROJECT_DIR/dashboard/public/by-icon.icns" "$staged_app/Contents/Resources/BY.icns"
 /bin/chmod +x "$staged_app/Contents/MacOS/BY"
+if command -v swiftc >/dev/null 2>&1; then
+  swiftc -O "$PROJECT_DIR/desktop/BYLauncher.swift" \
+    -o "$staged_app/Contents/MacOS/BY"
+fi
 if command -v codesign >/dev/null 2>&1; then
   # Ad-hoc signing avoids an unnecessary first-launch warning for this local app.
   /usr/bin/xattr -cr "$staged_app" 2>/dev/null || true

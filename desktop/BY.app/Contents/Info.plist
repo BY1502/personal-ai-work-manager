@@ -10,6 +10,10 @@
 	<string>com.by.personal-work-manager</string>
 	<key>CFBundleIconFile</key>
 	<string>BY.icns</string>
+	<key>CFBundleIconFiles</key>
+	<array>
+		<string>BY.icns</string>
+	</array>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
