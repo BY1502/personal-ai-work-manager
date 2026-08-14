@@ -111,7 +111,9 @@ schema-to-grammar 제한 때문에 generation schema에서는 `maxLength`/`maxIt
 
 Local Ollama 전송은 일시적인 timeout/연결 오류와 HTTP 408, 425, 429, 5xx만
 최대 `LOCAL_LLM_RETRY_ATTEMPTS`회(전체 시도 횟수)까지 재시도합니다. 400/401/403/404/422,
-JSON 파싱 실패, Schema 검증 실패는 재시도하지 않고 즉시 실패합니다. 재시도와
+JSON 파싱 실패, Schema 검증 실패는 HTTP 전송 재시도를 일으키지 않습니다. 기존
+`repair_attempts=1` 설정은 잘못된 모델 출력을 한 번 더 Schema에 맞춰 생성하도록
+요청할 수 있지만, 그 출력도 실패하면 즉시 종료합니다. 모든 전송 재시도·수정 출력·
 Schema 검증은 Canonical Memory 저장 전에 끝나므로 최종 실패가 업무 기록을 오염시키지
 않습니다. `LOCAL_LLM_RETRY_BACKOFF_SECONDS`는 지수 backoff의 시작값이며 테스트에서는
 `0`으로 둘 수 있습니다.
