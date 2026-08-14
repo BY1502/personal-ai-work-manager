@@ -4,6 +4,7 @@ import copy
 import json
 import os
 import threading
+import time
 from collections.abc import Mapping
 from urllib.parse import urlsplit
 from typing import Mapping, Protocol
@@ -61,6 +62,11 @@ EXTRACTION_PROMPT_VERSION = "work-extraction-ko-v10"
 MAX_MODEL_OUTPUT_BYTES = 200_000
 MAX_MODEL_NAME_LENGTH = 200
 DEFAULT_EXTRACT_CONCURRENCY = 2
+DEFAULT_LOCAL_RETRY_ATTEMPTS = 2
+DEFAULT_LOCAL_RETRY_BACKOFF_SECONDS = 0.25
+MAX_LOCAL_RETRY_ATTEMPTS = 5
+MAX_RETRY_BACKOFF_SECONDS = 5.0
+RETRYABLE_HTTP_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
 
 
 class _LLMExtractionProvider:
@@ -223,8 +229,17 @@ class LocalLLMProvider(_LLMExtractionProvider):
         max_output_tokens: int = 4_096,
         client: httpx.Client | None = None,
         repair_attempts: int = 1,
+        retry_attempts: int = DEFAULT_LOCAL_RETRY_ATTEMPTS,
+        retry_backoff_seconds: float = DEFAULT_LOCAL_RETRY_BACKOFF_SECONDS,
     ) -> None:
         timeout_seconds = _validated_timeout(timeout_seconds, "timeout_seconds")
+        retry_attempts = _validated_integer(
+            retry_attempts,
+            "retry_attempts",
+            minimum=1,
+            maximum=MAX_LOCAL_RETRY_ATTEMPTS,
+        )
+        retry_backoff_seconds = _validated_backoff(retry_backoff_seconds)
         transport = OllamaStructuredOutputTransport(
             base_url=base_url,
             model_name=model_name,
@@ -242,6 +257,8 @@ class LocalLLMProvider(_LLMExtractionProvider):
                 maximum=16_384,
             ),
             client=client,
+            retry_attempts=retry_attempts,
+            retry_backoff_seconds=retry_backoff_seconds,
         )
         super().__init__(transport, repair_attempts=repair_attempts)
 
@@ -283,6 +300,8 @@ class OllamaStructuredOutputTransport:
         context_length: int = 16_384,
         max_output_tokens: int = 4_096,
         client: httpx.Client | None = None,
+        retry_attempts: int = DEFAULT_LOCAL_RETRY_ATTEMPTS,
+        retry_backoff_seconds: float = DEFAULT_LOCAL_RETRY_BACKOFF_SECONDS,
     ) -> None:
         self.base_url = _validated_base_url(base_url, "LOCAL_LLM_BASE_URL")
         self.model_name = _validated_model_name(
@@ -300,6 +319,13 @@ class OllamaStructuredOutputTransport:
             minimum=256,
             maximum=16_384,
         )
+        self.retry_attempts = _validated_integer(
+            retry_attempts,
+            "retry_attempts",
+            minimum=1,
+            maximum=MAX_LOCAL_RETRY_ATTEMPTS,
+        )
+        self.retry_backoff_seconds = _validated_backoff(retry_backoff_seconds)
         self.client = client or httpx.Client(timeout=timeout_seconds)
 
     def complete_json(
@@ -332,7 +358,13 @@ class OllamaStructuredOutputTransport:
                 "num_predict": self.max_output_tokens,
             },
         }
-        response = _safe_post(self.client, f"{self.base_url}/api/chat", payload)
+        response = _safe_post(
+            self.client,
+            f"{self.base_url}/api/chat",
+            payload,
+            attempts=self.retry_attempts,
+            backoff_seconds=self.retry_backoff_seconds,
+        )
         try:
             body = response.json()
         except ValueError:
@@ -505,6 +537,20 @@ def build_extraction_provider(
                 minimum=256,
                 maximum=16_384,
             ),
+            retry_attempts=_integer(
+                values,
+                "LOCAL_LLM_RETRY_ATTEMPTS",
+                default=DEFAULT_LOCAL_RETRY_ATTEMPTS,
+                minimum=1,
+                maximum=MAX_LOCAL_RETRY_ATTEMPTS,
+            ),
+            retry_backoff_seconds=_float(
+                values,
+                "LOCAL_LLM_RETRY_BACKOFF_SECONDS",
+                default=DEFAULT_LOCAL_RETRY_BACKOFF_SECONDS,
+                minimum=0.0,
+                maximum=MAX_RETRY_BACKOFF_SECONDS,
+            ),
         )
         return ConcurrencyLimitedExtractionProvider(
             provider,
@@ -672,22 +718,56 @@ def _safe_post(
     payload: dict,
     *,
     headers: dict[str, str] | None = None,
+    attempts: int = 1,
+    backoff_seconds: float = 0.0,
 ) -> httpx.Response:
-    try:
-        response = client.post(url, json=payload, headers=headers)
-    except httpx.TimeoutException as exc:
-        raise ExtractionTimeoutError("extraction provider timed out") from exc
-    except httpx.HTTPError as exc:
-        raise ExtractionTransportError(
-            "could not reach extraction provider"
-        ) from exc
-    if response.status_code < 200 or response.status_code >= 300:
-        raise ExtractionTransportError(
-            f"extraction provider returned HTTP {response.status_code}"
+    if isinstance(attempts, bool) or not isinstance(attempts, int):
+        raise ProviderConfigurationError("attempts must be an integer")
+    if attempts < 1 or attempts > MAX_LOCAL_RETRY_ATTEMPTS:
+        raise ProviderConfigurationError(
+            f"attempts must be between 1 and {MAX_LOCAL_RETRY_ATTEMPTS}"
         )
-    if len(response.content) > MAX_MODEL_OUTPUT_BYTES * 2:
-        raise ExtractionTransportError("provider response exceeded safe limit")
-    return response
+    backoff_seconds = _validated_backoff(backoff_seconds)
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            response = client.post(url, json=payload, headers=headers)
+        except httpx.TimeoutException as exc:
+            last_error = exc
+            if attempt + 1 < attempts:
+                _sleep_before_retry(backoff_seconds, attempt)
+                continue
+            raise ExtractionTimeoutError("extraction provider timed out") from exc
+        except httpx.HTTPError as exc:
+            last_error = exc
+            if attempt + 1 < attempts:
+                _sleep_before_retry(backoff_seconds, attempt)
+                continue
+            raise ExtractionTransportError(
+                "could not reach extraction provider"
+            ) from exc
+        if response.status_code < 200 or response.status_code >= 300:
+            if (
+                response.status_code in RETRYABLE_HTTP_STATUS
+                and attempt + 1 < attempts
+            ):
+                _sleep_before_retry(backoff_seconds, attempt)
+                continue
+            raise ExtractionTransportError(
+                f"extraction provider returned HTTP {response.status_code}"
+            )
+        if len(response.content) > MAX_MODEL_OUTPUT_BYTES * 2:
+            raise ExtractionTransportError("provider response exceeded safe limit")
+        return response
+    raise ExtractionTransportError(
+        "could not reach extraction provider"
+    ) from last_error
+
+
+def _sleep_before_retry(backoff_seconds: float, attempt: int) -> None:
+    if backoff_seconds <= 0:
+        return
+    time.sleep(min(MAX_RETRY_BACKOFF_SECONDS, backoff_seconds * (2**attempt)))
 
 
 def _strict_json_object(raw: str) -> dict:
@@ -813,10 +893,42 @@ def _timeout(values: Mapping[str, str], name: str) -> float:
     return _validated_timeout(value, name)
 
 
+def _float(
+    values: Mapping[str, str],
+    name: str,
+    *,
+    default: float,
+    minimum: float,
+    maximum: float,
+) -> float:
+    raw = values.get(name, str(default))
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ProviderConfigurationError(f"{name} must be numeric") from exc
+    if value < minimum or value > maximum:
+        raise ProviderConfigurationError(
+            f"{name} must be between {minimum:g} and {maximum:g}"
+        )
+    return value
+
+
 def _validated_timeout(value: float, name: str) -> float:
     if not 0.1 <= value <= 300:
         raise ProviderConfigurationError(f"{name} must be between 0.1 and 300")
     return value
+
+
+def _validated_backoff(value: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ProviderConfigurationError(
+            "retry_backoff_seconds must be numeric"
+        )
+    if not 0.0 <= float(value) <= MAX_RETRY_BACKOFF_SECONDS:
+        raise ProviderConfigurationError(
+            "retry_backoff_seconds must be between 0 and 5"
+        )
+    return float(value)
 
 
 def _acquire_timeout(
