@@ -22,6 +22,9 @@ Idempotency, LLM 검증, Context Linking, WorkManager 경계를 그대로 사용
 걸릴 수 있습니다. 앱 실행 시 Backend가 꺼져 있으면 Docker Compose를 자동으로
 시작하고 최대 30초 동안 `/health`를 확인합니다.
 
+소스가 업데이트된 뒤에는 `./scripts/install_by_spotlight.sh --update`를 사용합니다.
+기존 앱은 삭제하지 않고 `~/Library/Application Support/BY/previous/`에 보관합니다.
+
 ## 설정
 
 기본값은 다음과 같습니다.

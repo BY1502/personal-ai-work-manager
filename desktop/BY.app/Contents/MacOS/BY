@@ -1,6 +1,10 @@
 #!/bin/zsh
 set -u
 
+# Finder/Spotlight launches do not inherit the interactive shell PATH. Docker
+# Desktop on Apple Silicon is commonly exposed through /opt/homebrew/bin.
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
+
 APP_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROJECT_FILE="$APP_ROOT/Resources/project-path"
 PROJECT_DIR="${BY_PROJECT_DIR:-}"
