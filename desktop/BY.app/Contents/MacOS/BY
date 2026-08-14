@@ -67,12 +67,27 @@ fi
 client_message_id="spotlight-$(/bin/date +%s)-${RANDOM}"
 payload="$(printf '%s' "$capture" | /usr/bin/ruby -rjson -e 'text=STDIN.read; puts JSON.generate({"client_message_id"=>ARGV[0],"content"=>text})' "$client_message_id")"
 response_file="$(/usr/bin/mktemp -t by-response.XXXXXX)"
-http_code=$(/usr/bin/curl -sS --max-time 180 -o "$response_file" -w '%{http_code}' \
-  -H 'Content-Type: application/json' \
-  -d "$payload" "$API_BASE/api/v1/chat/runs" || true)
+send_request() {
+  /usr/bin/curl -sS --max-time 180 -o "$response_file" -w '%{http_code}' \
+    -H 'Content-Type: application/json' \
+    -d "$payload" "$API_BASE/api/v1/chat/runs" || true
+}
+
+http_code="$(send_request)"
+
+# A local model can occasionally produce a schema-valid but deterministic-policy-
+# invalid draft. The backend marks that run FAILED, so replaying the exact same
+# client_message_id claims the existing run instead of creating duplicate memory.
+if [[ "$http_code" == "422" ]]; then
+  error_code=$(/usr/bin/ruby -rjson -e 'begin; data=JSON.parse(STDIN.read); puts(data.dig("error", "code") || ""); rescue; puts ""; end' < "$response_file")
+  if [[ "$error_code" == "DETERMINISTIC_VALIDATION_FAILED" ]]; then
+    /bin/sleep 0.2
+    http_code="$(send_request)"
+  fi
+fi
 
 if [[ "$http_code" != "200" ]]; then
-  detail=$(/usr/bin/ruby -rjson -e 'begin; data=JSON.parse(STDIN.read); puts(data.dig("error", "message") || data.dig("error", "code") || "응답을 받지 못했습니다."); rescue; puts "응답을 읽지 못했습니다."; end' < "$response_file")
+  detail=$(/usr/bin/ruby -rjson -e 'begin; data=JSON.parse(STDIN.read); error=data["error"] || {}; detail=error["detail"] || error["message"] || error["code"] || data["detail"]; puts(detail.is_a?(Array) ? detail.map(&:to_s).join("\n") : (detail || "응답을 받지 못했습니다.")); rescue; puts "응답을 읽지 못했습니다."; end' < "$response_file")
   /bin/rm -f "$response_file"
   show_message "BY 기록 실패" "HTTP $http_code\n$detail"
   exit 1
