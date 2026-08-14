@@ -5,7 +5,7 @@ import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import Body, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.context_linking import MemoryManager
@@ -222,8 +222,18 @@ def create_app(
         return {"status": "ok"}
 
     @application.post("/api/v1/chat/runs", response_model=JarvisResponse)
-    def run_chat(request: dict[str, object]) -> JarvisResponse:
-        normalized_request: dict[str, object] = dict(request)
+    def run_chat(request: object = Body(default=None)) -> JarvisResponse:
+        # Keep the HTTP boundary tolerant of older desktop shells and cached
+        # web clients.  A typed ``dict`` parameter makes FastAPI reject a
+        # JSON string/list before this compatibility layer can normalize it,
+        # which surfaces as an opaque 422 in the app.  The canonical contract
+        # is still enforced below by ChatRunRequest.model_validate().
+        if isinstance(request, dict):
+            normalized_request: dict[str, object] = dict(request)
+        elif isinstance(request, str) and request.strip():
+            normalized_request = {"content": request}
+        else:
+            normalized_request = {}
         if (
             "content" not in normalized_request
             and (

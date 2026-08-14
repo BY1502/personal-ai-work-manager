@@ -142,6 +142,22 @@ def test_legacy_chat_payload_aliases_and_ui_metadata_are_tolerated(
         assert response.json()["status"] == "COMPLETED"
 
 
+def test_chat_accepts_plain_json_text_from_desktop_shell(tmp_path: Path) -> None:
+    """Older Spotlight shells sometimes POST the text itself, not an object."""
+    app = create_app(
+        database_path=tmp_path / "plain-chat.sqlite",
+        extractor=DeterministicTestProvider(),
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/chat/runs",
+            content='"오늘 예측매니저 설치 가이드 수정했어."',
+            headers={"Content-Type": "application/json"},
+        )
+        assert response.status_code == 200
+        assert response.json()["status"] == "COMPLETED"
+
+
 def test_runtime_loads_skill_body_and_bounded_context_package(tmp_path: Path) -> None:
     provider = CapturingProvider()
     app = create_app(database_path=tmp_path / "context.sqlite", extractor=provider)
