@@ -47,6 +47,15 @@ def resolve_local_date(expression: str, *, today: date) -> date:
         return today
     if normalized == "YESTERDAY":
         return date.fromordinal(today.toordinal() - 1)
+    # The extraction contract stores the date of the recorded activity, not a
+    # due-date field.  Local models sometimes emit a relative future token for
+    # a sentence such as "다음 주에 전달할 거야".  Keeping that token as a
+    # validation error makes ordinary planning notes fail with HTTP 422 and
+    # loses the user's work context.  Until a first-class due-date field is
+    # added, treat the explicitly-known future planning tokens as recorded
+    # today.  Unknown tokens still fail closed below.
+    if normalized in {"TOMORROW", "NEXT_WEEK", "NEXT_MONTH", "LATER", "FUTURE"}:
+        return today
     return date.fromisoformat(expression)
 
 
