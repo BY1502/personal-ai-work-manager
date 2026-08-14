@@ -8,6 +8,8 @@
 	<string>BY</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.by.personal-work-manager</string>
+	<key>CFBundleIconFile</key>
+	<string>BY.icns</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>

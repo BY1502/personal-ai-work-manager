@@ -30,6 +30,7 @@ staged_app="$staging_dir/BY.app"
 /usr/bin/ditto "$SOURCE_APP" "$staged_app"
 /bin/mkdir -p "$staged_app/Contents/Resources"
 printf '%s\n' "$PROJECT_DIR" > "$staged_app/Contents/Resources/project-path"
+/usr/bin/ditto "$PROJECT_DIR/dashboard/public/by-icon.icns" "$staged_app/Contents/Resources/BY.icns"
 /bin/chmod +x "$staged_app/Contents/MacOS/BY"
 if command -v codesign >/dev/null 2>&1; then
   # Ad-hoc signing avoids an unnecessary first-launch warning for this local app.
