@@ -31,6 +31,11 @@ staged_app="$staging_dir/BY.app"
 /bin/mkdir -p "$staged_app/Contents/Resources"
 printf '%s\n' "$PROJECT_DIR" > "$staged_app/Contents/Resources/project-path"
 /bin/chmod +x "$staged_app/Contents/MacOS/BY"
+if command -v codesign >/dev/null 2>&1; then
+  # Ad-hoc signing avoids an unnecessary first-launch warning for this local app.
+  /usr/bin/xattr -cr "$staged_app" 2>/dev/null || true
+  codesign --force --deep --sign - "$staged_app" >/dev/null 2>&1 || true
+fi
 
 if [[ -e "$TARGET_APP" ]]; then
   backup_dir="$HOME/Library/Application Support/BY/previous"
