@@ -124,6 +124,24 @@ def test_work_capture_vertical_slice_uses_registry_runtime_and_phase1_apply(tmp_
         connection.close()
 
 
+def test_legacy_chat_payload_aliases_and_ui_metadata_are_tolerated(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "legacy-chat.sqlite"
+    app = create_app(database_path=db_path, extractor=DeterministicTestProvider())
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/chat/runs",
+            json={
+                "text": "오늘 예측매니저 설치 가이드 수정했어.",
+                "ui_source": "cached-dashboard",
+                "conversationId": None,
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["status"] == "COMPLETED"
+
+
 def test_runtime_loads_skill_body_and_bounded_context_package(tmp_path: Path) -> None:
     provider = CapturingProvider()
     app = create_app(database_path=tmp_path / "context.sqlite", extractor=provider)

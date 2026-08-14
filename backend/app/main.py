@@ -235,6 +235,11 @@ def create_app(
                 "user_message",
                 normalized_request.pop("message", None),
             )
+        if (
+            "content" not in normalized_request
+            and normalized_request.get("text") is not None
+        ):
+            normalized_request["content"] = normalized_request.pop("text")
         normalized_request.pop("message", None)
         normalized_request.pop("user_message", None)
         if (
@@ -256,6 +261,42 @@ def create_app(
             normalized_request["client_message_id"] = normalized_request.pop("message_id")
         normalized_request.pop("user_id", None)
         normalized_request.pop("userId", None)
+        # Older dashboard shells occasionally attach UI-only metadata. It is
+        # not part of the canonical chat contract and must not turn a valid
+        # request into a 422 merely because the shell was cached.
+        normalized_request = {
+            key: value
+            for key, value in normalized_request.items()
+            if key in {"conversation_id", "client_message_id", "content"}
+        }
+        if (
+            "client_message_id" not in normalized_request
+            and isinstance(normalized_request.get("content"), str)
+            and normalized_request["content"].strip()
+        ):
+            conversation_key = normalized_request.get("conversation_id") or "default"
+            normalized_request["client_message_id"] = (
+                "legacy-"
+                + sha256_text(
+                    f"{conversation_key}:{normalized_request['content']}"
+                )[:48]
+            )
+        if (
+            "client_message_id" in normalized_request
+            and normalized_request["client_message_id"] is not None
+            and not isinstance(normalized_request["client_message_id"], str)
+        ):
+            normalized_request["client_message_id"] = str(
+                normalized_request["client_message_id"]
+            )
+        if (
+            "conversation_id" in normalized_request
+            and normalized_request["conversation_id"] is not None
+            and not isinstance(normalized_request["conversation_id"], str)
+        ):
+            normalized_request["conversation_id"] = str(
+                normalized_request["conversation_id"]
+            )
         try:
             payload = ChatRunRequest.model_validate(normalized_request)
         except ValidationError as error:
