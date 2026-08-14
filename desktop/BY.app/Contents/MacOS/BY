@@ -1,0 +1,90 @@
+#!/bin/zsh
+set -u
+
+APP_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+PROJECT_FILE="$APP_ROOT/Resources/project-path"
+PROJECT_DIR="${BY_PROJECT_DIR:-}"
+if [[ -z "$PROJECT_DIR" && -f "$PROJECT_FILE" ]]; then
+  PROJECT_DIR="$(<"$PROJECT_FILE")"
+fi
+
+API_BASE="${BY_API_BASE_URL:-http://127.0.0.1:8100}"
+DASHBOARD_URL="${BY_DASHBOARD_URL:-http://127.0.0.1:3100/personal-ai-work-manager/dashboard}"
+LOG_FILE="${HOME}/Library/Logs/BY-start.log"
+
+show_message() {
+  local title="$1"
+  local message="$2"
+  /usr/bin/osascript - "$title" "$message" <<'APPLESCRIPT'
+on run argv
+  display dialog (item 2 of argv) with title (item 1 of argv) buttons {"확인"} default button "확인"
+end run
+APPLESCRIPT
+}
+
+if [[ -z "$PROJECT_DIR" || ! -x "$PROJECT_DIR/scripts/start_by.sh" ]]; then
+  show_message "BY를 시작할 수 없습니다" "프로젝트 경로를 찾지 못했습니다. 설치 스크립트를 다시 실행해주세요."
+  exit 1
+fi
+
+if ! /usr/bin/curl -fsS --max-time 2 "$API_BASE/health" >/dev/null 2>&1; then
+  /bin/mkdir -p "${HOME}/Library/Logs"
+  /usr/bin/nohup /bin/zsh "$PROJECT_DIR/scripts/start_by.sh" >"$LOG_FILE" 2>&1 &
+  ready=0
+  for attempt in {1..30}; do
+    if /usr/bin/curl -fsS --max-time 2 "$API_BASE/health" >/dev/null 2>&1; then
+      ready=1
+      break
+    fi
+    /bin/sleep 1
+  done
+  if [[ "$ready" -ne 1 ]]; then
+    show_message "BY 연결 대기 시간 초과" "Docker 또는 Local Ollama가 준비되지 않았습니다.\n로그: $LOG_FILE"
+    exit 1
+  fi
+fi
+
+if [[ "${BY_DRY_RUN:-0}" == "1" ]]; then
+  print "BY ready: $API_BASE"
+  exit 0
+fi
+
+capture=$(/usr/bin/osascript <<'APPLESCRIPT'
+set answer to display dialog "오늘 업무를 BY에게 말해주세요" with title "BY Quick Capture" default answer "" buttons {"취소", "기록하기"} default button "기록하기" cancel button "취소"
+return text returned of answer
+APPLESCRIPT
+)
+
+if [[ -z "${capture//[[:space:]]/}" ]]; then
+  show_message "BY" "입력된 내용이 없어 기록하지 않았습니다."
+  exit 0
+fi
+
+client_message_id="spotlight-$(/bin/date +%s)-${RANDOM}"
+payload="$(printf '%s' "$capture" | /usr/bin/ruby -rjson -e 'text=STDIN.read; puts JSON.generate({"client_message_id"=>ARGV[0],"content"=>text})' "$client_message_id")"
+response_file="$(/usr/bin/mktemp -t by-response.XXXXXX)"
+http_code=$(/usr/bin/curl -sS --max-time 180 -o "$response_file" -w '%{http_code}' \
+  -H 'Content-Type: application/json' \
+  -d "$payload" "$API_BASE/api/v1/chat/runs" || true)
+
+if [[ "$http_code" != "200" ]]; then
+  detail=$(/usr/bin/ruby -rjson -e 'begin; data=JSON.parse(STDIN.read); puts(data.dig("error", "message") || data.dig("error", "code") || "응답을 받지 못했습니다."); rescue; puts "응답을 읽지 못했습니다."; end' < "$response_file")
+  /bin/rm -f "$response_file"
+  show_message "BY 기록 실패" "HTTP $http_code\n$detail"
+  exit 1
+fi
+
+result=$(/usr/bin/ruby -rjson -e 'begin; data=JSON.parse(STDIN.read); puts(data["display_response"] || "기록했습니다."); rescue; puts "기록 결과를 읽지 못했습니다."; end' < "$response_file")
+/bin/rm -f "$response_file"
+
+choice=$(/usr/bin/osascript - "$result" "$DASHBOARD_URL" <<'APPLESCRIPT'
+on run argv
+  set answer to display dialog (item 1 of argv) with title "BY" buttons {"닫기", "Dashboard 열기"} default button "닫기"
+  if button returned of answer is "Dashboard 열기" then return "open"
+  return "close"
+end run
+APPLESCRIPT
+)
+if [[ "$choice" == "open" ]]; then
+  /usr/bin/open "$DASHBOARD_URL"
+fi

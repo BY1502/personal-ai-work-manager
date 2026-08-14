@@ -18,6 +18,16 @@ Dashboard는 PWA로 설치할 수 있습니다. 먼저 Docker를 실행한 뒤
 `페이지를 앱으로 설치`를 선택하세요. 설치 후에는 Dock의 BY 아이콘을 눌러
 브라우저 탭 없이 사용할 수 있습니다.
 
+더 빠른 기록을 위해 macOS Spotlight Quick Capture도 제공합니다. 아래 설치 후
+`⌘Space`에서 `BY`를 검색하면 한 줄 입력창이 바로 열리고, 입력 내용은 기존
+Backend의 안전한 Chat 경로로 저장됩니다.
+
+```bash
+./scripts/install_by_spotlight.sh
+```
+
+자세한 동작과 설정은 [macOS Quick Capture 안내](desktop/README.md)를 참고하세요.
+
 현재 Backend에는 Desktop UI보다 먼저 검증하는 Phase 2 실행 기반도 포함되어
 있습니다. Skill Registry가 `SKILL.md`를 검증하고, Permission Engine이 읽기 Tool
 권한을 제한하며, Trigger/Event Engine이 업무 상태를 바탕으로 결정론적 제안을
