@@ -28,7 +28,7 @@ from app.utils import local_date
 from app.validation import ExtractionValidator
 from app.work_manager import WorkManager
 from app.work_queries import StructuredWorkQueryService
-from app.tts import LocalTTSBridge, TTSResult
+from app.tts import TTSProvider, TTSResult
 
 
 class UnsupportedResolution(ValueError):
@@ -55,7 +55,7 @@ class JarvisOrchestrator:
         extractor: ExtractionProvider,
         skill_runtime: SkillRuntime | None = None,
         calendar_manager: CalendarManager | None = None,
-        tts: LocalTTSBridge | None = None,
+        tts: TTSProvider | None = None,
         event_engine: EventEngine | None = None,
         validator: ExtractionValidator,
         user_id: str,
@@ -467,13 +467,12 @@ class JarvisOrchestrator:
         response: JarvisResponse,
         memory_status: str,
     ) -> JarvisResponse:
-        """Attach optional voice presentation, then persist the final response.
+        """Persist the terminal result before optional voice presentation.
 
-        TTS is deliberately after all canonical work has been applied and is
-        best-effort. A bridge outage can remove an audio affordance, but can
-        never roll back or block Structured Memory.
+        TTS is deliberately after both Canonical Memory and the run lifecycle
+        have completed. A slow bridge can delay the first HTTP response, but a
+        retry or restart sees the terminal text result and never reapplies work.
         """
-        response = self._attach_tts(run_id=run_id, response=response)
         self.repository.complete_run(
             user_id=self.user_id,
             run_id=run_id,
@@ -499,7 +498,21 @@ class JarvisOrchestrator:
                 # Trigger diagnostics must never turn a completed work write
                 # into a failed chat request.
                 pass
-        return response
+        voiced_response = self._attach_tts(run_id=run_id, response=response)
+        if voiced_response.audio_url:
+            try:
+                self.repository.attach_run_audio(
+                    user_id=self.user_id,
+                    run_id=run_id,
+                    expected_response=response,
+                    audio_url=voiced_response.audio_url,
+                    duration_seconds=voiced_response.audio_duration_seconds,
+                )
+            except Exception:
+                # The terminal text result is already durable. Presentation
+                # persistence must not turn it back into a failed request.
+                pass
+        return voiced_response
 
     def _attach_tts(self, *, run_id: str, response: JarvisResponse) -> JarvisResponse:
         if self.tts is None or not response.voice_response.strip():
@@ -520,6 +533,21 @@ class JarvisOrchestrator:
                 # turn a successful text/canonical operation into an error.
                 pass
             return response
+        if result.fallback_used:
+            try:
+                self.repository.append_skill_event(
+                    user_id=self.user_id,
+                    run_id=run_id,
+                    event_type="TTS_FALLBACK_USED",
+                    public_summary="The preferred local voice was unavailable; the fallback voice was used.",
+                    payload={
+                        "primary_provider": self.tts.provider_name,
+                        "fallback_provider": result.provider_name,
+                        "error_code": result.primary_error_code,
+                    },
+                )
+            except Exception:
+                pass
         return response.model_copy(
             update={
                 "audio_url": result.audio_url,

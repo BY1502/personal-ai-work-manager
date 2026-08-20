@@ -148,7 +148,14 @@ curl http://127.0.0.1:8766/api/health
 참고하세요. TTS가 중단되어도 텍스트 응답과 Structured Memory 저장은 계속됩니다.
 
 학습한 개인 음성을 사용하려면 별도 브리지를 직접 연결할 수 있지만, 공개 기본값은
-다운로드형 Piper 모델로 유지합니다.
+다운로드형 Piper 모델로 유지합니다. 로컬 브리지 우선 + Piper 대체 구성은
+[TTS 서비스와 모델 정책](tts/README.md)에 설명되어 있습니다.
+
+공개 Push 전에는 개인 경로와 모델·음성 산출물이 추적되지 않는지 확인합니다.
+
+```bash
+./scripts/check_public_safety.sh
+```
 
 ## 함께 공부하고 기여하기
 

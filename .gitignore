@@ -11,6 +11,12 @@ backend/.env
 dashboard/.env
 .env
 **/.env.local
+/.local/
+/private/
+/compose.local.yaml
+/compose.override.yaml
+/.env.tts.local
+/tts/local.env
 
 # Local-only validation/correction fixtures may contain work content
 *.local.jsonl
@@ -53,3 +59,16 @@ tts/audio/
 *.gguf
 *.safetensors
 *.onnx
+*.onnx.json
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.npy
+*.mlmodel
+*.mlmodelc/
+*.wav
+*.mp3
+*.flac
+*.m4a
+*.provenance.json

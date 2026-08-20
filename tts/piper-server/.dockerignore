@@ -1,0 +1,16 @@
+.git
+.env*
+.local/
+private/
+models/
+audio/
+*.onnx
+*.onnx.json
+*.npz
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.wav
+*.mp3
+*.flac

@@ -60,7 +60,7 @@ from app.validation import DeterministicValidationError, ExtractionValidator
 import sqlite3
 from app.work_manager import WorkManager
 from app.work_queries import StructuredWorkQueryService
-from app.tts import LocalTTSBridge
+from app.tts import FailoverTTSBridge, LocalTTSBridge, TTSProvider
 from pydantic import ValidationError
 
 
@@ -69,7 +69,7 @@ def create_app(
     database_path: Path | None = None,
     clock: Clock | None = None,
     extractor: ExtractionProvider | None = None,
-    tts: LocalTTSBridge | None = None,
+    tts: TTSProvider | None = None,
     calendar_gateway: CalendarGateway | None = None,
 ) -> FastAPI:
     resolved_database_path = database_path or Path(
@@ -145,8 +145,9 @@ def create_app(
     tts_enabled = os.getenv("TTS_ENABLED", "false").strip().lower() not in {
         "0", "false", "no", "off",
     }
-    resolved_tts = tts or (
-        LocalTTSBridge(
+    configured_tts: TTSProvider | None = None
+    if tts_enabled:
+        primary_tts = LocalTTSBridge(
             base_url=os.getenv("TTS_BRIDGE_URL", "http://127.0.0.1:8765"),
             public_base_url=os.getenv(
                 "TTS_PUBLIC_BASE_URL", "http://127.0.0.1:8766"
@@ -155,9 +156,30 @@ def create_app(
             provider_name=os.getenv("TTS_PROVIDER_NAME", "local-piper"),
             model_name=os.getenv("TTS_MODEL_NAME", "ko_KR-kss-medium"),
         )
-        if tts_enabled
-        else None
-    )
+        fallback_url = os.getenv("TTS_FALLBACK_BRIDGE_URL", "").strip()
+        if fallback_url:
+            fallback_tts = LocalTTSBridge(
+                base_url=fallback_url,
+                public_base_url=os.getenv(
+                    "TTS_FALLBACK_PUBLIC_BASE_URL", "http://127.0.0.1:8766"
+                ),
+                timeout_seconds=float(
+                    os.getenv("TTS_FALLBACK_TIMEOUT_SECONDS", "30")
+                ),
+                provider_name=os.getenv(
+                    "TTS_FALLBACK_PROVIDER_NAME", "local-piper"
+                ),
+                model_name=os.getenv(
+                    "TTS_FALLBACK_MODEL_NAME", "ko_KR-kss-medium"
+                ),
+            )
+            configured_tts = FailoverTTSBridge(
+                primary=primary_tts,
+                fallback=fallback_tts,
+            )
+        else:
+            configured_tts = primary_tts
+    resolved_tts = tts or configured_tts
     dashboard = DashboardReadService(
         database=database,
         work_queries=work_queries,

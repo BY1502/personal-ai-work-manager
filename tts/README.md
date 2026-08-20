@@ -37,3 +37,25 @@ PIPER_AUTO_DOWNLOAD=true
 운영하고 `TTS_BRIDGE_URL`, `TTS_PUBLIC_BASE_URL`만 바꿀 수 있습니다. 개인 모델
 경로를 애플리케이션 코드에 하드코딩하지 않는 것이 공개 저장소를 유지하는 핵심
 규칙입니다.
+
+Docker Backend가 macOS에서 실행 중인 개인 음성 브리지를 우선 사용하고 Piper를
+대체 음성으로 유지하려면 Git에서 제외된 루트 `.env`에만 다음 형태로 설정합니다.
+
+```dotenv
+TTS_BRIDGE_URL=http://host.docker.internal:8765
+TTS_PUBLIC_BASE_URL=http://127.0.0.1:8765
+TTS_PROVIDER_NAME=local-private
+TTS_MODEL_NAME=private-voice
+TTS_TIMEOUT_SECONDS=45
+TTS_FALLBACK_BRIDGE_URL=http://tts:8765
+TTS_FALLBACK_PUBLIC_BASE_URL=http://127.0.0.1:8766
+TTS_FALLBACK_PROVIDER_NAME=local-piper
+TTS_FALLBACK_MODEL_NAME=ko_KR-kss-medium
+TTS_FALLBACK_TIMEOUT_SECONDS=30
+```
+
+개인 브리지가 timeout, 연결 실패, 잘못된 응답을 반환하면 음성 요청만 Piper로 한 번
+대체합니다. 업무 저장이나 다른 Canonical Memory 동작은 다시 실행하지 않습니다.
+모델, speaker embedding, 생성 WAV 및 개인 절대 경로는 저장소 밖에 둡니다.
+업무 결과와 Run 상태는 음성 합성 전에 먼저 완료되므로, 합성 중 BY가 재시작되어도
+같은 업무가 다시 적용되지 않습니다.

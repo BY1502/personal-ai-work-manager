@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
+from typing import Protocol
 from urllib.parse import urljoin
 
 import httpx
@@ -18,6 +20,19 @@ class TTSTimeout(TTSError):
 class TTSResult:
     audio_url: str
     duration_seconds: float | None = None
+    provider_name: str | None = None
+    model_name: str | None = None
+    fallback_used: bool = False
+    primary_error_code: str | None = None
+
+
+class TTSProvider(Protocol):
+    """Presentation-only voice provider used by the orchestrator."""
+
+    provider_name: str
+    model_name: str
+
+    def synthesize(self, text: str) -> TTSResult: ...
 
 
 class LocalTTSBridge:
@@ -70,14 +85,53 @@ class LocalTTSBridge:
                 payload = response.json()
             except ValueError as exc:
                 raise TTSError("TTS service returned invalid JSON") from exc
+            if not isinstance(payload, dict):
+                raise TTSError("TTS service returned a non-object JSON payload")
             relative_url = payload.get("audio_url")
             if not isinstance(relative_url, str) or not relative_url.startswith("/"):
                 raise TTSError("TTS service did not return an audio URL")
             duration = payload.get("duration")
+            if duration is not None:
+                try:
+                    duration = float(duration)
+                except (TypeError, ValueError) as exc:
+                    raise TTSError("TTS service returned an invalid duration") from exc
+                if not math.isfinite(duration) or duration < 0:
+                    raise TTSError("TTS service returned an invalid duration")
             return TTSResult(
                 audio_url=urljoin(self.public_base_url, relative_url.lstrip("/")),
-                duration_seconds=(float(duration) if duration is not None else None),
+                duration_seconds=duration,
+                provider_name=self.provider_name,
+                model_name=self.model_name,
             )
         finally:
             if owns_client:
                 client.close()
+
+
+class FailoverTTSBridge:
+    """Try a private/local voice first and fall back once to a public default.
+
+    Both providers remain outside Canonical Memory. A failure never retries the
+    work operation; only the presentation-only synthesis request is retried.
+    """
+
+    def __init__(self, *, primary: TTSProvider, fallback: TTSProvider) -> None:
+        self.primary = primary
+        self.fallback = fallback
+        self.provider_name = primary.provider_name
+        self.model_name = primary.model_name
+
+    def synthesize(self, text: str) -> TTSResult:
+        try:
+            return self.primary.synthesize(text)
+        except TTSError as primary_error:
+            result = self.fallback.synthesize(text)
+            return TTSResult(
+                audio_url=result.audio_url,
+                duration_seconds=result.duration_seconds,
+                provider_name=result.provider_name or self.fallback.provider_name,
+                model_name=result.model_name or self.fallback.model_name,
+                fallback_used=True,
+                primary_error_code=type(primary_error).__name__,
+            )

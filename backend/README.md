@@ -214,9 +214,11 @@ TTS는 Backend 외부의 HTTP 서비스이며 기본 Docker 구성은 별도 Pip
 사용합니다. `TTS_BRIDGE_URL`은 컨테이너 내부 주소, `TTS_PUBLIC_BASE_URL`은
 브라우저가 재생할 주소입니다. TTS 실패는 `TTS_FAILED` 진단만 남기고 텍스트 응답과
 Canonical Memory를 유지합니다. 모델 파일은 named volume으로 다운로드되며 GitHub에
-포함되지 않습니다.
+포함되지 않습니다. 선택적인 `TTS_FALLBACK_*` 설정을 사용하면 로컬 개인 음성 실패 시
+Piper로 음성 합성만 한 번 대체합니다. Run은 TTS보다 먼저 완료되므로 합성 중 재시작도
+Canonical 작업 재적용을 유발하지 않습니다.
 
-현재 전체 Backend Suite는 42개 테스트입니다.
+현재 전체 Backend Suite는 54개 테스트입니다.
 
 ## 주요 문서
 

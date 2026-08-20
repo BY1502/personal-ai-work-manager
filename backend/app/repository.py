@@ -802,6 +802,42 @@ class WorkRepository:
                 now=now,
             )
 
+    def attach_run_audio(
+        self,
+        *,
+        user_id: str,
+        run_id: str,
+        expected_response: JarvisResponse,
+        audio_url: str,
+        duration_seconds: float | None,
+    ) -> None:
+        """Attach presentation metadata to an already-terminal chat result.
+
+        The CAS keeps this best-effort presentation update from reopening or
+        otherwise changing the run lifecycle and Canonical Memory status.
+        """
+        expected_json = expected_response.model_dump_json()
+        response = expected_response.model_copy(
+            update={
+                "audio_url": audio_url,
+                "audio_duration_seconds": duration_seconds,
+            }
+        )
+        with self.database.transaction() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE orchestration_runs
+                SET result_json = ?
+                WHERE id = ?
+                  AND user_id = ?
+                  AND status IN ('COMPLETED', 'NEEDS_CLARIFICATION')
+                  AND result_json = ?
+                """,
+                (response.model_dump_json(), run_id, user_id, expected_json),
+            )
+            if cursor.rowcount != 1:
+                raise VersionConflict("run response changed during audio synthesis")
+
     def record_context_link_correction(
         self,
         *,
