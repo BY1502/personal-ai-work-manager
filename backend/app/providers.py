@@ -64,6 +64,7 @@ MAX_MODEL_NAME_LENGTH = 200
 DEFAULT_EXTRACT_CONCURRENCY = 2
 DEFAULT_LOCAL_RETRY_ATTEMPTS = 2
 DEFAULT_LOCAL_RETRY_BACKOFF_SECONDS = 0.25
+DEFAULT_LOCAL_MODEL = "qwen3.5:35b-a3b-q4_K_M"
 MAX_LOCAL_RETRY_ATTEMPTS = 5
 MAX_RETRY_BACKOFF_SECONDS = 5.0
 RETRYABLE_HTTP_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
@@ -518,7 +519,7 @@ def build_extraction_provider(
         provider = LocalLLMProvider(
             base_url=values.get("LOCAL_LLM_BASE_URL", "http://127.0.0.1:11434"),
             model_name=(
-                values.get("LOCAL_LLM_MODEL", "qwen3:4b")
+                values.get("LOCAL_LLM_MODEL", DEFAULT_LOCAL_MODEL)
                 if environment is None
                 else _required(values, "LOCAL_LLM_MODEL")
             ),

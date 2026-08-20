@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from app.database import Database
 from app.extraction import DeterministicTestProvider
 from app.main import create_app
+from app.model_profiles import LOGICAL_MODEL_PROFILE_NAMES, ModelProfileResolver
 from app.providers import ExtractionTimeoutError
 from app.skills.registry import SkillRegistry
 from app.tools.registry import (
@@ -85,6 +86,20 @@ def _counts(path: Path) -> dict[str, int]:
         }
     finally:
         connection.close()
+
+
+def test_all_logical_skill_profiles_share_one_configured_model() -> None:
+    class ConfiguredWorker:
+        provider_name = "local"
+        model_name = "qwen3.5:35b-a3b-q4_K_M"
+
+    profiles = ModelProfileResolver(ConfiguredWorker()).all()
+
+    assert set(profiles) == set(LOGICAL_MODEL_PROFILE_NAMES)
+    assert {
+        (profile.provider_name, profile.model_name)
+        for profile in profiles.values()
+    } == {("local", "qwen3.5:35b-a3b-q4_K_M")}
 
 
 def test_work_capture_vertical_slice_uses_registry_runtime_and_phase1_apply(tmp_path: Path) -> None:

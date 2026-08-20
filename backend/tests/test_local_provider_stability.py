@@ -45,7 +45,7 @@ def test_local_transport_retries_timeout_then_succeeds() -> None:
 
     transport = OllamaStructuredOutputTransport(
         base_url="http://ollama.test",
-        model_name="qwen3:4b",
+        model_name="qwen3.5:35b-a3b-q4_K_M",
         timeout_seconds=0.2,
         client=_transport(handler),
         retry_attempts=2,
@@ -75,7 +75,7 @@ def test_local_transport_retries_transient_http_status_only() -> None:
 
     transport = OllamaStructuredOutputTransport(
         base_url="http://ollama.test",
-        model_name="qwen3:4b",
+        model_name="qwen3.5:35b-a3b-q4_K_M",
         timeout_seconds=0.2,
         client=_transport(handler),
         retry_attempts=2,
@@ -101,7 +101,7 @@ def test_local_transport_does_not_retry_non_transient_http_status() -> None:
 
     transport = OllamaStructuredOutputTransport(
         base_url="http://ollama.test",
-        model_name="qwen3:4b",
+        model_name="qwen3.5:35b-a3b-q4_K_M",
         timeout_seconds=0.2,
         client=_transport(handler),
         retry_attempts=3,
@@ -128,7 +128,7 @@ def test_local_transport_final_timeout_is_safe_and_bounded() -> None:
 
     transport = OllamaStructuredOutputTransport(
         base_url="http://ollama.test",
-        model_name="qwen3:4b",
+        model_name="qwen3.5:35b-a3b-q4_K_M",
         timeout_seconds=0.2,
         client=_transport(handler),
         retry_attempts=2,
@@ -155,7 +155,7 @@ def test_invalid_structured_output_is_not_retried_by_transport() -> None:
 
     provider = LocalLLMProvider(
         base_url="http://ollama.test",
-        model_name="qwen3:4b",
+        model_name="qwen3.5:35b-a3b-q4_K_M",
         timeout_seconds=0.2,
         client=_transport(handler),
         retry_attempts=3,
@@ -175,7 +175,7 @@ def test_local_provider_final_timeout_does_not_write_canonical_memory(
 
     provider = LocalLLMProvider(
         base_url="http://ollama.test",
-        model_name="qwen3:4b",
+        model_name="qwen3.5:35b-a3b-q4_K_M",
         timeout_seconds=0.2,
         client=_transport(handler),
         retry_attempts=2,
@@ -301,7 +301,7 @@ def test_local_provider_free_korean_capture_and_response_preserve_memory_boundar
 
     provider = LocalLLMProvider(
         base_url="http://ollama.test",
-        model_name="qwen3:4b",
+        model_name="qwen3.5:35b-a3b-q4_K_M",
         timeout_seconds=0.2,
         client=_transport(handler),
         retry_attempts=1,

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 OLLAMA_URL="${LOCAL_LLM_BASE_URL:-http://127.0.0.1:11434}"
-MODEL="${LOCAL_LLM_MODEL:-qwen3:4b}"
+MODEL="${LOCAL_LLM_MODEL:-qwen3.5:35b-a3b-q4_K_M}"
 BACKEND_URL="${BACKEND_URL:-http://127.0.0.1:8100}"
 
 echo "[1/3] Ollama health"

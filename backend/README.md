@@ -47,19 +47,22 @@ cp .env.example .env
 환경 변수는 실행 Shell에서 export하거나 `.env` 내용을 별도로 로드해야 합니다.
 애플리케이션 자체가 `.env` 파일을 자동으로 읽지는 않습니다.
 
-운영 기본값은 Local Ollama `qwen3:4b`입니다. API Provider를 사용하려면
+운영 기본값은 Local Ollama `qwen3.5:35b-a3b-q4_K_M`입니다. 하나의 Backend
+프로세스는 업무 추출, Skill 실행, 추천 설명, 보고서 요약에 같은 Provider와 모델을
+공유합니다. `jarvis-reasoning`, `worker-balanced`, `worker-fast`는 SKILL.md와 실행
+로그에 남는 논리적 역할 라벨일 뿐 별도 모델로 라우팅하지 않습니다. API Provider를 사용하려면
 `EXTRACTION_PROVIDER=api`로 전환할 수 있으며, OpenAI Responses 호환 endpoint와
 모델을 환경 변수로 지정합니다.
 
 ```bash
 ollama serve
-ollama pull qwen3:4b
+ollama pull qwen3.5:35b-a3b-q4_K_M
 EXTRACTION_PROVIDER=local
 ```
 
 자동 테스트는 `EXTRACTION_PROVIDER=deterministic`을 명시해 외부 모델에 의존하지 않습니다.
 
-### Local 모델 A/B 검증
+### Local 모델 품질 검증
 
 모델을 교체하기 전에는 실제 사용자 DB와 분리된 합성 한국어 회귀 세트로
 구조화 정확도와 지연시간을 비교합니다. 아래 스크립트는 DB를 열거나 수정하지 않고,
@@ -69,7 +72,7 @@ EXTRACTION_PROVIDER=local
 ```bash
 cd backend
 .venv/bin/python scripts/benchmark_extraction_models.py \
-  qwen3:4b qwen3.5:35b-a3b-q4_K_M
+  qwen3.5:35b-a3b-q4_K_M
 ```
 
 결과에는 전체 사례 통과 수, semantic check rate, 평균/P95 지연시간과 실패한
@@ -95,10 +98,10 @@ case ID만 포함됩니다. 실제 업무 원문이나 Canonical Memory는 평�
 Ollama Local Provider:
 
 ```bash
-ollama pull qwen3:4b
+ollama pull qwen3.5:35b-a3b-q4_K_M
 EXTRACTION_PROVIDER=local
 LOCAL_LLM_BASE_URL=http://127.0.0.1:11434
-LOCAL_LLM_MODEL=qwen3:4b
+LOCAL_LLM_MODEL=qwen3.5:35b-a3b-q4_K_M
 LOCAL_LLM_CONTEXT_LENGTH=16384
 LOCAL_LLM_MAX_OUTPUT_TOKENS=4096
 LOCAL_LLM_RETRY_ATTEMPTS=2
@@ -178,7 +181,7 @@ SHA-256으로 변환됩니다.
 Export에는 실제 업무 문장이 포함될 수 있으므로 외부 저장소에 바로 Commit하거나
 통계 Summary에 첨부하지 않습니다.
 
-현재 개발 환경에서는 `qwen3:4b`로 승인된 3턴 시나리오를 실제 Ollama `/api/chat`에
+현재 개발 환경에서는 `qwen3.5:35b-a3b-q4_K_M`으로 승인된 3턴 시나리오를 실제 Ollama `/api/chat`에
 호출해 모두 200, 동일 Work Item 연결, `WAITING → IN_PROGRESS`, Next Action, Activity
 3건, 조회 응답을 확인했습니다. 주간보고도 실제 LLM narration으로 생성했습니다.
 API Provider는 자격증명이 없어 HTTP contract까지만 자동 검증했습니다.
@@ -207,7 +210,7 @@ TTS는 Backend 외부의 HTTP 서비스이며 기본 Docker 구성은 별도 Pip
 Canonical Memory를 유지합니다. 모델 파일은 named volume으로 다운로드되며 GitHub에
 포함되지 않습니다.
 
-현재 전체 Backend Suite는 22개 테스트입니다.
+현재 전체 Backend Suite는 36개 테스트입니다.
 
 ## 주요 문서
 

@@ -7,7 +7,7 @@ BY 업무 매니저입니다.
 
 ~~~bash
 brew services start ollama
-ollama pull qwen3:4b
+ollama pull qwen3.5:35b-a3b-q4_K_M
 docker compose up -d --build
 ~~~
 
@@ -44,9 +44,13 @@ Structured Memory를 직접 쓰지 않습니다. Multi-Skill Planner, 병렬 실
 
 ## LLM Provider 선택
 
-기본값은 로컬 Ollama입니다. OpenAI Responses 호환 API를 사용할 때는 `.env`에
+기본값은 로컬 Ollama `qwen3.5:35b-a3b-q4_K_M` 하나입니다. 업무 추출, Skill 실행,
+추천 설명, 보고서 요약은 Backend가 시작될 때 선택한 같은 Provider/모델을 공유합니다.
+`SKILL.md`가 역할과 지침을 나누며 Skill별로 별도 모델을 선택하지 않습니다.
+
+OpenAI Responses 호환 API를 사용할 때는 `.env`에
 다음처럼 설정합니다. 두 경로 모두 같은 구조화 출력 검증을 통과해야 하므로
-Provider만 바뀌고 Memory 저장 규칙은 바뀌지 않습니다.
+프로세스 전체의 단일 Provider/모델만 바뀌고 Memory 저장 규칙은 바뀌지 않습니다.
 
 ```dotenv
 EXTRACTION_PROVIDER=api
