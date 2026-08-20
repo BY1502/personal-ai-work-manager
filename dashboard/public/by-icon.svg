@@ -1,5 +1,30 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <rect width="512" height="512" rx="112" fill="#173d31"/>
-  <path fill="#c9ec79" d="M129 112h111c72 0 113 33 113 88 0 28-13 51-37 66 35 14 53 41 53 78 0 60-46 95-125 95H129V112Zm74 62v69h37c31 0 47-11 47-35 0-23-16-34-47-34h-37Zm0 130v73h43c35 0 52-12 52-37 0-24-17-36-52-36h-43Z"/>
-  <path fill="#fbfaf7" d="M370 112h74l-92 152v175h-74V264l-92-152h76l53 99 55-99Z" opacity=".92"/>
+  <defs>
+    <linearGradient id="by-bg" x1="64" y1="40" x2="452" y2="478" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#214f40"/>
+      <stop offset="1" stop-color="#0e2d29"/>
+    </linearGradient>
+    <radialGradient id="by-glow" cx="0" cy="0" r="1" gradientTransform="translate(392 108) rotate(135) scale(182)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#c9ec79" stop-opacity=".25"/>
+      <stop offset="1" stop-color="#c9ec79" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <rect width="512" height="512" rx="128" fill="url(#by-bg)"/>
+  <rect x="8" y="8" width="496" height="496" rx="120" fill="none" stroke="#c9ec79" stroke-opacity=".28" stroke-width="4"/>
+  <circle cx="392" cy="108" r="180" fill="url(#by-glow)"/>
+
+  <!-- A small orbit and spark make the mark feel like an attentive AI assistant. -->
+  <path d="M337 74c40-18 85-4 103 29 17 31 4 67-30 84" fill="none" stroke="#c9ec79" stroke-linecap="round" stroke-width="8" opacity=".85"/>
+  <path d="m416 76 6 15 15 6-15 6-6 15-6-15-15-6 15-6 6-15Z" fill="#fbfaf7"/>
+  <circle cx="435" cy="188" r="11" fill="#c9ec79"/>
+
+  <!-- BY lettering remains the primary shape for quick recognition in Spotlight. -->
+  <path fill="#c9ec79" d="M108 126h111c72 0 113 33 113 88 0 28-13 51-37 66 35 14 53 41 53 78 0 60-46 95-125 95H108V126Zm74 62v69h37c31 0 47-11 47-35 0-23-16-34-47-34h-37Zm0 130v73h43c35 0 52-12 52-37 0-24-17-36-52-36h-43Z"/>
+  <path fill="#fbfaf7" d="M349 126h74l-92 152v175h-74V278l-92-152h76l53 99 55-99Z" opacity=".95"/>
+
+  <!-- Three quiet dots suggest conversation without competing with the letters. -->
+  <circle cx="92" cy="426" r="7" fill="#fbfaf7" opacity=".9"/>
+  <circle cx="119" cy="426" r="7" fill="#fbfaf7" opacity=".65"/>
+  <circle cx="146" cy="426" r="7" fill="#fbfaf7" opacity=".4"/>
 </svg>

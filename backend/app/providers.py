@@ -4,6 +4,7 @@ import copy
 import json
 import os
 import threading
+import time
 from collections.abc import Mapping
 from urllib.parse import urlsplit
 from typing import Mapping, Protocol
@@ -61,6 +62,12 @@ EXTRACTION_PROMPT_VERSION = "work-extraction-ko-v10"
 MAX_MODEL_OUTPUT_BYTES = 200_000
 MAX_MODEL_NAME_LENGTH = 200
 DEFAULT_EXTRACT_CONCURRENCY = 2
+DEFAULT_LOCAL_RETRY_ATTEMPTS = 2
+DEFAULT_LOCAL_RETRY_BACKOFF_SECONDS = 0.25
+DEFAULT_LOCAL_MODEL = "qwen3.5:35b-a3b-q4_K_M"
+MAX_LOCAL_RETRY_ATTEMPTS = 5
+MAX_RETRY_BACKOFF_SECONDS = 5.0
+RETRYABLE_HTTP_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
 
 
 class _LLMExtractionProvider:
@@ -85,6 +92,56 @@ class _LLMExtractionProvider:
 
     def extract(self, content: str) -> ExtractionEnvelope:
         return self.extract_with_context(content, None)
+
+    def execute_skill(
+        self,
+        *,
+        skill_name: str,
+        model_profile: str,
+        input_payload: dict,
+        context: dict,
+        output_schema: dict,
+    ) -> dict:
+        """Execute a generic read/proposal Skill with the configured model.
+
+        The model only returns a draft matching the Skill schema. It receives
+        no database or external-write handle; deterministic application code
+        remains responsible for validation, approval and side effects.
+        """
+
+        instructions = str(context.get("skill", {}).get("instructions", "")).strip()
+        system_prompt = (
+            "당신은 BY의 제한된 Skill Worker입니다. 아래 SKILL.md 지침만 수행하세요. "
+            "DB나 외부 서비스를 직접 변경하지 말고, 요청된 JSON Schema 객체 하나만 "
+            "반환하세요. 설명, Markdown, Chain-of-Thought를 출력하지 마세요.\n\n"
+            f"Skill: {skill_name}\nModel profile label: {model_profile}\n"
+            f"SKILL.md:\n{instructions}\n\nJSON Schema:\n"
+            + json.dumps(output_schema, ensure_ascii=False, separators=(",", ":"))
+        )
+        user_prompt = json.dumps(
+            {
+                "input": input_payload,
+                "context_package": context.get("context_package", {}),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        raw = self.transport.complete_json(
+            schema_name=skill_name.replace("-", "_") + "_output",
+            schema=output_schema,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+        )
+        if not isinstance(raw, str) or not raw.strip():
+            raise ExtractionTransportError("provider returned empty Skill output")
+        if len(raw.encode("utf-8")) > MAX_MODEL_OUTPUT_BYTES:
+            raise ExtractionTransportError("Skill output exceeded safe limit")
+        try:
+            return _strict_json_object(raw)
+        except ValueError:
+            raise ExtractionInvalidJsonError(
+                "provider returned invalid Skill JSON"
+            ) from None
 
     def extract_with_context(
         self,
@@ -186,23 +243,24 @@ class ConcurrencyLimitedExtractionProvider(ExtractionProvider):
     ) -> ExtractionEnvelope:
         return self._extract(content, context)
 
+    def execute_skill(self, **kwargs) -> dict:
+        self._acquire()
+        try:
+            method = getattr(self._delegate, "execute_skill", None)
+            if not callable(method):
+                raise ExtractionProviderError(
+                    "configured provider does not support generic Skills"
+                )
+            return method(**kwargs)
+        finally:
+            self._semaphore.release()
+
     def _extract(
         self,
         content: str,
         context: dict | None,
     ) -> ExtractionEnvelope:
-        if self._acquire_timeout_seconds <= 0:
-            if not self._semaphore.acquire(blocking=False):
-                raise ExtractionConcurrencyError(
-                    "provider extraction is at capacity, please retry shortly"
-                )
-        elif not self._semaphore.acquire(
-            blocking=True,
-            timeout=self._acquire_timeout_seconds,
-        ):
-            raise ExtractionConcurrencyError(
-                "provider extraction is at capacity, please retry shortly"
-            )
+        self._acquire()
         try:
             method = getattr(self._delegate, "extract_with_context", None)
             if callable(method):
@@ -210,6 +268,19 @@ class ConcurrencyLimitedExtractionProvider(ExtractionProvider):
             return self._delegate.extract(content)
         finally:
             self._semaphore.release()
+
+    def _acquire(self) -> None:
+        if self._acquire_timeout_seconds <= 0:
+            acquired = self._semaphore.acquire(blocking=False)
+        else:
+            acquired = self._semaphore.acquire(
+                blocking=True,
+                timeout=self._acquire_timeout_seconds,
+            )
+        if not acquired:
+            raise ExtractionConcurrencyError(
+                "provider extraction is at capacity, please retry shortly"
+            )
 
 
 class LocalLLMProvider(_LLMExtractionProvider):
@@ -223,8 +294,17 @@ class LocalLLMProvider(_LLMExtractionProvider):
         max_output_tokens: int = 4_096,
         client: httpx.Client | None = None,
         repair_attempts: int = 1,
+        retry_attempts: int = DEFAULT_LOCAL_RETRY_ATTEMPTS,
+        retry_backoff_seconds: float = DEFAULT_LOCAL_RETRY_BACKOFF_SECONDS,
     ) -> None:
         timeout_seconds = _validated_timeout(timeout_seconds, "timeout_seconds")
+        retry_attempts = _validated_integer(
+            retry_attempts,
+            "retry_attempts",
+            minimum=1,
+            maximum=MAX_LOCAL_RETRY_ATTEMPTS,
+        )
+        retry_backoff_seconds = _validated_backoff(retry_backoff_seconds)
         transport = OllamaStructuredOutputTransport(
             base_url=base_url,
             model_name=model_name,
@@ -242,6 +322,8 @@ class LocalLLMProvider(_LLMExtractionProvider):
                 maximum=16_384,
             ),
             client=client,
+            retry_attempts=retry_attempts,
+            retry_backoff_seconds=retry_backoff_seconds,
         )
         super().__init__(transport, repair_attempts=repair_attempts)
 
@@ -283,6 +365,8 @@ class OllamaStructuredOutputTransport:
         context_length: int = 16_384,
         max_output_tokens: int = 4_096,
         client: httpx.Client | None = None,
+        retry_attempts: int = DEFAULT_LOCAL_RETRY_ATTEMPTS,
+        retry_backoff_seconds: float = DEFAULT_LOCAL_RETRY_BACKOFF_SECONDS,
     ) -> None:
         self.base_url = _validated_base_url(base_url, "LOCAL_LLM_BASE_URL")
         self.model_name = _validated_model_name(
@@ -300,6 +384,13 @@ class OllamaStructuredOutputTransport:
             minimum=256,
             maximum=16_384,
         )
+        self.retry_attempts = _validated_integer(
+            retry_attempts,
+            "retry_attempts",
+            minimum=1,
+            maximum=MAX_LOCAL_RETRY_ATTEMPTS,
+        )
+        self.retry_backoff_seconds = _validated_backoff(retry_backoff_seconds)
         self.client = client or httpx.Client(timeout=timeout_seconds)
 
     def complete_json(
@@ -332,7 +423,13 @@ class OllamaStructuredOutputTransport:
                 "num_predict": self.max_output_tokens,
             },
         }
-        response = _safe_post(self.client, f"{self.base_url}/api/chat", payload)
+        response = _safe_post(
+            self.client,
+            f"{self.base_url}/api/chat",
+            payload,
+            attempts=self.retry_attempts,
+            backoff_seconds=self.retry_backoff_seconds,
+        )
         try:
             body = response.json()
         except ValueError:
@@ -486,7 +583,7 @@ def build_extraction_provider(
         provider = LocalLLMProvider(
             base_url=values.get("LOCAL_LLM_BASE_URL", "http://127.0.0.1:11434"),
             model_name=(
-                values.get("LOCAL_LLM_MODEL", "qwen3:4b")
+                values.get("LOCAL_LLM_MODEL", DEFAULT_LOCAL_MODEL)
                 if environment is None
                 else _required(values, "LOCAL_LLM_MODEL")
             ),
@@ -504,6 +601,20 @@ def build_extraction_provider(
                 default=4_096,
                 minimum=256,
                 maximum=16_384,
+            ),
+            retry_attempts=_integer(
+                values,
+                "LOCAL_LLM_RETRY_ATTEMPTS",
+                default=DEFAULT_LOCAL_RETRY_ATTEMPTS,
+                minimum=1,
+                maximum=MAX_LOCAL_RETRY_ATTEMPTS,
+            ),
+            retry_backoff_seconds=_float(
+                values,
+                "LOCAL_LLM_RETRY_BACKOFF_SECONDS",
+                default=DEFAULT_LOCAL_RETRY_BACKOFF_SECONDS,
+                minimum=0.0,
+                maximum=MAX_RETRY_BACKOFF_SECONDS,
             ),
         )
         return ConcurrencyLimitedExtractionProvider(
@@ -576,6 +687,9 @@ def _extraction_system_prompt(schema: dict) -> str:
         "그 외에는 반드시 false입니다. 회신이 구체적인 후속 행동을 "
         "명시한 경우에만 IN_PROGRESS와 next_action 후보를 만드세요. "
         "오늘/어제는 occurred_on에 TODAY/YESTERDAY로 보존하세요. "
+        "다음주·추후·나중에처럼 미래 계획을 말해도 due-date 필드는 없으므로 "
+        "occurred_on은 TODAY로 기록하세요. NEXT_WEEK 같은 토큰은 사용하지 "
+        "마세요. "
         "제품명·서비스명·고유 업무명처럼 명시된 대상은 project_mention에 넣고, "
         "서로 관련된 활동은 사용자가 한 말을 짧게 정규화한 하나의 "
         "work_item_mention으로 묶으세요. summary의 동사는 원문의 의미를 바꾸지 "
@@ -672,22 +786,56 @@ def _safe_post(
     payload: dict,
     *,
     headers: dict[str, str] | None = None,
+    attempts: int = 1,
+    backoff_seconds: float = 0.0,
 ) -> httpx.Response:
-    try:
-        response = client.post(url, json=payload, headers=headers)
-    except httpx.TimeoutException as exc:
-        raise ExtractionTimeoutError("extraction provider timed out") from exc
-    except httpx.HTTPError as exc:
-        raise ExtractionTransportError(
-            "could not reach extraction provider"
-        ) from exc
-    if response.status_code < 200 or response.status_code >= 300:
-        raise ExtractionTransportError(
-            f"extraction provider returned HTTP {response.status_code}"
+    if isinstance(attempts, bool) or not isinstance(attempts, int):
+        raise ProviderConfigurationError("attempts must be an integer")
+    if attempts < 1 or attempts > MAX_LOCAL_RETRY_ATTEMPTS:
+        raise ProviderConfigurationError(
+            f"attempts must be between 1 and {MAX_LOCAL_RETRY_ATTEMPTS}"
         )
-    if len(response.content) > MAX_MODEL_OUTPUT_BYTES * 2:
-        raise ExtractionTransportError("provider response exceeded safe limit")
-    return response
+    backoff_seconds = _validated_backoff(backoff_seconds)
+    last_error: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            response = client.post(url, json=payload, headers=headers)
+        except httpx.TimeoutException as exc:
+            last_error = exc
+            if attempt + 1 < attempts:
+                _sleep_before_retry(backoff_seconds, attempt)
+                continue
+            raise ExtractionTimeoutError("extraction provider timed out") from exc
+        except httpx.HTTPError as exc:
+            last_error = exc
+            if attempt + 1 < attempts:
+                _sleep_before_retry(backoff_seconds, attempt)
+                continue
+            raise ExtractionTransportError(
+                "could not reach extraction provider"
+            ) from exc
+        if response.status_code < 200 or response.status_code >= 300:
+            if (
+                response.status_code in RETRYABLE_HTTP_STATUS
+                and attempt + 1 < attempts
+            ):
+                _sleep_before_retry(backoff_seconds, attempt)
+                continue
+            raise ExtractionTransportError(
+                f"extraction provider returned HTTP {response.status_code}"
+            )
+        if len(response.content) > MAX_MODEL_OUTPUT_BYTES * 2:
+            raise ExtractionTransportError("provider response exceeded safe limit")
+        return response
+    raise ExtractionTransportError(
+        "could not reach extraction provider"
+    ) from last_error
+
+
+def _sleep_before_retry(backoff_seconds: float, attempt: int) -> None:
+    if backoff_seconds <= 0:
+        return
+    time.sleep(min(MAX_RETRY_BACKOFF_SECONDS, backoff_seconds * (2**attempt)))
 
 
 def _strict_json_object(raw: str) -> dict:
@@ -813,10 +961,42 @@ def _timeout(values: Mapping[str, str], name: str) -> float:
     return _validated_timeout(value, name)
 
 
+def _float(
+    values: Mapping[str, str],
+    name: str,
+    *,
+    default: float,
+    minimum: float,
+    maximum: float,
+) -> float:
+    raw = values.get(name, str(default))
+    try:
+        value = float(raw)
+    except (TypeError, ValueError) as exc:
+        raise ProviderConfigurationError(f"{name} must be numeric") from exc
+    if value < minimum or value > maximum:
+        raise ProviderConfigurationError(
+            f"{name} must be between {minimum:g} and {maximum:g}"
+        )
+    return value
+
+
 def _validated_timeout(value: float, name: str) -> float:
     if not 0.1 <= value <= 300:
         raise ProviderConfigurationError(f"{name} must be between 0.1 and 300")
     return value
+
+
+def _validated_backoff(value: float) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ProviderConfigurationError(
+            "retry_backoff_seconds must be numeric"
+        )
+    if not 0.0 <= float(value) <= MAX_RETRY_BACKOFF_SECONDS:
+        raise ProviderConfigurationError(
+            "retry_backoff_seconds must be between 0 and 5"
+        )
+    return float(value)
 
 
 def _acquire_timeout(

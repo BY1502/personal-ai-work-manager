@@ -5,10 +5,51 @@ import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import (
+    Body,
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+)
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.auth import (
+    SESSION_COOKIE_NAME,
+    AuthService,
+    AuthenticatedUser,
+    ChangePasswordRequest,
+    ConversationCreationConflict,
+    ConversationHistoryService,
+    CreateConversationRequest,
+    InvalidCredentials,
+    InvalidRecoveryCode,
+    LocalAuthenticationMiddleware,
+    LoginRateLimited,
+    LoginRequest,
+    PasswordReuseNotAllowed,
+    RecoveryRateLimited,
+    RegisterRequest,
+    ResetPasswordRequest,
+    RotateRecoveryCodeRequest,
+    UsernameAlreadyExists,
+)
 from app.context_linking import MemoryManager
+from app.calendar_agent import (
+    CalendarConfigurationError,
+    CalendarDraftValidationError,
+    CalendarExecutionUncertain,
+    CalendarGateway,
+    CalendarManager,
+    CalendarOperationInProgress,
+    CalendarProviderError,
+    CalendarResolutionRequest,
+    build_calendar_gateway,
+    is_calendar_request,
+)
 from app.event_engine import DomainEvent, EventEngine
 from app.context_package import ContextPackageBuilder
 from app.database import Database
@@ -49,7 +90,7 @@ from app.validation import DeterministicValidationError, ExtractionValidator
 import sqlite3
 from app.work_manager import WorkManager
 from app.work_queries import StructuredWorkQueryService
-from app.tts import LocalTTSBridge
+from app.tts import FailoverTTSBridge, LocalTTSBridge, TTSProvider
 from pydantic import ValidationError
 
 
@@ -58,7 +99,9 @@ def create_app(
     database_path: Path | None = None,
     clock: Clock | None = None,
     extractor: ExtractionProvider | None = None,
-    tts: LocalTTSBridge | None = None,
+    tts: TTSProvider | None = None,
+    calendar_gateway: CalendarGateway | None = None,
+    auth_required: bool | None = None,
 ) -> FastAPI:
     resolved_database_path = database_path or Path(
         os.getenv("PERSONAL_AI_DB_PATH", "data/personal_ai.db")
@@ -75,7 +118,16 @@ def create_app(
     work_manager = WorkManager(database)
     work_queries = StructuredWorkQueryService(database)
     resolved_extractor = extractor or build_extraction_provider()
-    tool_registry = build_default_tool_registry(database=database)
+    resolved_calendar_gateway = calendar_gateway or build_calendar_gateway()
+    calendar_manager = CalendarManager(
+        database=database,
+        repository=repository,
+        gateway=resolved_calendar_gateway,
+    )
+    tool_registry = build_default_tool_registry(
+        database=database,
+        calendar_gateway=resolved_calendar_gateway,
+    )
     skills_root = Path(
         os.getenv(
             "SKILLS_ROOT",
@@ -87,7 +139,9 @@ def create_app(
     ).strip().lower() not in {"0", "false", "no", "off"}
     auto_enable_names = {
         name.strip()
-        for name in os.getenv("SKILL_AUTO_ENABLE", "work-capture").split(",")
+        for name in os.getenv(
+            "SKILL_AUTO_ENABLE", "work-capture,calendar-agent"
+        ).split(",")
         if name.strip()
     }
     skill_registry = SkillRegistry(
@@ -122,8 +176,9 @@ def create_app(
     tts_enabled = os.getenv("TTS_ENABLED", "false").strip().lower() not in {
         "0", "false", "no", "off",
     }
-    resolved_tts = tts or (
-        LocalTTSBridge(
+    configured_tts: TTSProvider | None = None
+    if tts_enabled:
+        primary_tts = LocalTTSBridge(
             base_url=os.getenv("TTS_BRIDGE_URL", "http://127.0.0.1:8765"),
             public_base_url=os.getenv(
                 "TTS_PUBLIC_BASE_URL", "http://127.0.0.1:8766"
@@ -132,31 +187,63 @@ def create_app(
             provider_name=os.getenv("TTS_PROVIDER_NAME", "local-piper"),
             model_name=os.getenv("TTS_MODEL_NAME", "ko_KR-kss-medium"),
         )
-        if tts_enabled
-        else None
-    )
+        fallback_url = os.getenv("TTS_FALLBACK_BRIDGE_URL", "").strip()
+        if fallback_url:
+            fallback_tts = LocalTTSBridge(
+                base_url=fallback_url,
+                public_base_url=os.getenv(
+                    "TTS_FALLBACK_PUBLIC_BASE_URL", "http://127.0.0.1:8766"
+                ),
+                timeout_seconds=float(
+                    os.getenv("TTS_FALLBACK_TIMEOUT_SECONDS", "30")
+                ),
+                provider_name=os.getenv(
+                    "TTS_FALLBACK_PROVIDER_NAME", "local-piper"
+                ),
+                model_name=os.getenv(
+                    "TTS_FALLBACK_MODEL_NAME", "ko_KR-kss-medium"
+                ),
+            )
+            configured_tts = FailoverTTSBridge(
+                primary=primary_tts,
+                fallback=fallback_tts,
+            )
+        else:
+            configured_tts = primary_tts
+    resolved_tts = tts or configured_tts
     dashboard = DashboardReadService(
         database=database,
         work_queries=work_queries,
         recommendations=recommendations,
         extractor=resolved_extractor,
     )
-    orchestrator = JarvisOrchestrator(
-        repository=repository,
-        memory=memory,
-        work_manager=work_manager,
-        work_queries=work_queries,
-        recommendations=recommendations,
-        recommendation_presentation=recommendation_presentation,
-        reports=reports,
-        extractor=resolved_extractor,
-        skill_runtime=skill_runtime,
-        tts=resolved_tts,
-        event_engine=event_engine,
-        validator=ExtractionValidator(),
-        user_id=database.default_user_id,
-        timezone_name=database.timezone_name,
-    )
+    auth = AuthService(database)
+    history = ConversationHistoryService(database)
+
+    def orchestrator_for(
+        user_id: str,
+        *,
+        calendar_access: bool = False,
+    ) -> JarvisOrchestrator:
+        """Build an immutable request-scoped facade for one authenticated user."""
+
+        return JarvisOrchestrator(
+            repository=repository,
+            memory=memory,
+            work_manager=work_manager,
+            work_queries=work_queries,
+            recommendations=recommendations,
+            recommendation_presentation=recommendation_presentation,
+            reports=reports,
+            extractor=resolved_extractor,
+            skill_runtime=skill_runtime,
+            calendar_manager=(calendar_manager if calendar_access else None),
+            tts=resolved_tts,
+            event_engine=event_engine,
+            validator=ExtractionValidator(),
+            user_id=user_id,
+            timezone_name=database.timezone_name,
+        )
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
@@ -179,28 +266,29 @@ def create_app(
     application.state.recommendation_presentation = recommendation_presentation
     application.state.reports = reports
     application.state.dashboard = dashboard
-    application.state.orchestrator = orchestrator
+    application.state.orchestrator_factory = orchestrator_for
     application.state.tool_registry = tool_registry
     application.state.skill_registry = skill_registry
     application.state.skill_runtime = skill_runtime
+    application.state.calendar_manager = calendar_manager
+    application.state.calendar_gateway = resolved_calendar_gateway
     application.state.tts = resolved_tts
     application.state.event_engine = event_engine
+    application.state.auth = auth
+    application.state.history = history
     allowed_origins = [
         origin.strip()
         for origin in os.getenv(
             "DASHBOARD_ALLOWED_ORIGINS",
             "http://localhost:3000,http://127.0.0.1:3000,"
             "http://localhost:3001,http://127.0.0.1:3001,"
-            "https://jarvis-personal-work-manager.pastel-hinny-4854.chatgpt.site",
+            "http://localhost:3100,http://127.0.0.1:3100",
         ).split(",")
         if origin.strip()
     ]
     base_origin_regex = (
-        r"^https?://(?:localhost|127\.0\.0\.1|"
-        r"\[[0-9a-f:]+\]|"
-        r"[a-zA-Z0-9][a-zA-Z0-9.-]*|"
-        r"\d{1,3}(?:\.\d{1,3}){3})"
-        r"(?::(?:3000|3001|3100))$"
+        r"^https?://(?:localhost|127\.0\.0\.1|\[::1\])"
+        r"(?::(?:3000|3001|3100))?$"
     )
     env_origin_regex = os.getenv("DASHBOARD_ALLOWED_ORIGIN_REGEX", "").strip()
     allowed_origin_regex = (
@@ -208,22 +296,297 @@ def create_app(
         if env_origin_regex
         else base_origin_regex
     )
+    resolved_auth_required = (
+        auth_required
+        if auth_required is not None
+        else os.getenv("AUTH_REQUIRED", "true").strip().lower()
+        not in {"0", "false", "no", "off"}
+    )
+    cookie_secure = os.getenv("AUTH_COOKIE_SECURE", "false").strip().lower() in {
+        "1", "true", "yes", "on"
+    }
+    application.add_middleware(
+        LocalAuthenticationMiddleware,
+        auth=auth,
+        trusted_origins=set(allowed_origins),
+        trusted_origin_pattern=allowed_origin_regex,
+        auth_required=resolved_auth_required,
+    )
+    # CORS is installed after authentication so it remains the outer wrapper
+    # and attaches the correct headers to authentication failures as well.
     application.add_middleware(
         CORSMiddleware,
         allow_origins=allowed_origins,
         allow_origin_regex=allowed_origin_regex,
-        allow_credentials=False,
+        allow_credentials=True,
         allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["Content-Type", "Idempotency-Key"],
+        allow_headers=["Content-Type", "Idempotency-Key", "Accept"],
     )
+
+    def current_user(request: Request) -> AuthenticatedUser:
+        return request.state.auth_user
+
+    def owner_user(
+        user: AuthenticatedUser = Depends(current_user),
+    ) -> AuthenticatedUser:
+        if not user.is_owner:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "OWNER_ACCESS_REQUIRED",
+                    "detail": "Google Calendar is available only to the owner account",
+                },
+            )
+        return user
+
+    def set_session_cookie(response: Response, *, token: str, max_age: int) -> None:
+        response.set_cookie(
+            key=SESSION_COOKIE_NAME,
+            value=token,
+            max_age=max_age,
+            httponly=True,
+            secure=cookie_secure,
+            samesite="lax",
+            path="/",
+        )
 
     @application.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    @application.post("/api/v1/auth/register", status_code=201)
+    def register(
+        payload: RegisterRequest,
+        response: Response,
+        request: Request,
+    ) -> dict:
+        if os.getenv("AUTH_ALLOW_REGISTRATION", "true").strip().lower() in {
+            "0", "false", "no", "off"
+        }:
+            raise HTTPException(status_code=403, detail="registration is disabled")
+        session, claimed = auth.register(
+            payload,
+            user_agent=request.headers.get("user-agent"),
+        )
+        set_session_cookie(
+            response,
+            token=session.token,
+            max_age=session.max_age_seconds,
+        )
+        return {
+            "user": session.user.public_dict(),
+            "legacy_data_claimed": claimed,
+            "recovery_code": session.recovery_code,
+        }
+
+    @application.post("/api/v1/auth/login")
+    def login(
+        payload: LoginRequest,
+        response: Response,
+        request: Request,
+    ) -> dict:
+        session = auth.login(
+            payload,
+            user_agent=request.headers.get("user-agent"),
+        )
+        # Successful authentication rotates any browser-presented session.
+        auth.logout(request.cookies.get(SESSION_COOKIE_NAME))
+        set_session_cookie(
+            response,
+            token=session.token,
+            max_age=session.max_age_seconds,
+        )
+        return {"user": session.user.public_dict()}
+
+    @application.post("/api/v1/auth/logout", status_code=204)
+    def logout(
+        request: Request,
+        response: Response,
+    ) -> Response:
+        auth.logout(request.cookies.get(SESSION_COOKIE_NAME))
+        response.delete_cookie(
+            SESSION_COOKIE_NAME,
+            path="/",
+            secure=cookie_secure,
+            httponly=True,
+            samesite="lax",
+        )
+        response.status_code = 204
+        return response
+
+    @application.post("/api/v1/auth/logout-all", status_code=204)
+    def logout_all(
+        response: Response,
+        user: AuthenticatedUser = Depends(current_user),
+    ) -> Response:
+        auth.logout_all(user_id=user.id)
+        response.delete_cookie(
+            SESSION_COOKIE_NAME,
+            path="/",
+            secure=cookie_secure,
+            httponly=True,
+            samesite="lax",
+        )
+        response.status_code = 204
+        return response
+
+    @application.post("/api/v1/auth/password/change")
+    def change_password(
+        payload: ChangePasswordRequest,
+        request: Request,
+        response: Response,
+        user: AuthenticatedUser = Depends(current_user),
+    ) -> dict:
+        session = auth.change_password(
+            user_id=user.id,
+            request=payload,
+            user_agent=request.headers.get("user-agent"),
+        )
+        set_session_cookie(
+            response,
+            token=session.token,
+            max_age=session.max_age_seconds,
+        )
+        return {
+            "user": session.user.public_dict(),
+            "recovery_code": session.recovery_code,
+        }
+
+    @application.post("/api/v1/auth/password/reset")
+    def reset_password(
+        payload: ResetPasswordRequest,
+        response: Response,
+    ) -> dict:
+        recovery_code = auth.reset_password(payload)
+        response.delete_cookie(
+            SESSION_COOKIE_NAME,
+            path="/",
+            secure=cookie_secure,
+            httponly=True,
+            samesite="lax",
+        )
+        return {"recovery_code": recovery_code}
+
+    @application.post("/api/v1/auth/recovery-code/rotate")
+    def rotate_recovery_code(
+        payload: RotateRecoveryCodeRequest,
+        user: AuthenticatedUser = Depends(current_user),
+    ) -> dict:
+        return {
+            "recovery_code": auth.rotate_recovery_code(
+                user_id=user.id,
+                current_password=payload.current_password,
+            )
+        }
+
+    @application.get("/api/v1/auth/me")
+    def me(user: AuthenticatedUser = Depends(current_user)) -> dict:
+        return {"user": user.public_dict()}
+
+    @application.get("/api/v1/chat/conversations")
+    def list_conversations(
+        limit: int = Query(default=30, ge=1, le=100),
+        offset: int = Query(default=0, ge=0),
+        user: AuthenticatedUser = Depends(current_user),
+    ) -> dict:
+        return history.list_conversations(
+            user_id=user.id,
+            limit=limit,
+            offset=offset,
+        )
+
+    @application.post("/api/v1/chat/conversations")
+    def create_conversation(
+        payload: CreateConversationRequest,
+        response: Response,
+        idempotency_key: str = Header(
+            alias="Idempotency-Key",
+            min_length=8,
+            max_length=200,
+            pattern=r"^.*\S.*$",
+        ),
+        user: AuthenticatedUser = Depends(current_user),
+    ) -> dict:
+        result = history.create_conversation(
+            user_id=user.id,
+            request=payload,
+            idempotency_key=idempotency_key,
+        )
+        response.status_code = 201 if result["created"] else 200
+        return result
+
+    @application.get("/api/v1/chat/conversations/{conversation_id}/messages")
+    def conversation_messages(
+        conversation_id: str,
+        limit: int = Query(default=100, ge=1, le=200),
+        before_sequence: int | None = Query(default=None, ge=1),
+        user: AuthenticatedUser = Depends(current_user),
+    ) -> dict:
+        return history.messages(
+            user_id=user.id,
+            conversation_id=conversation_id,
+            limit=limit,
+            before_sequence=before_sequence,
+        )
+
+    @application.get("/api/v1/calendar/status")
+    def calendar_status(
+        _: AuthenticatedUser = Depends(owner_user),
+    ) -> dict:
+        return calendar_manager.status()
+
+    @application.get("/api/v1/calendar/proposals/{proposal_id}")
+    def get_calendar_proposal(
+        proposal_id: str,
+        user: AuthenticatedUser = Depends(owner_user),
+    ):
+        return calendar_manager.get_proposal(
+            user_id=user.id,
+            proposal_id=proposal_id,
+        )
+
+    @application.post("/api/v1/calendar/proposals/{proposal_id}/resolve")
+    def resolve_calendar_proposal(
+        proposal_id: str,
+        request: CalendarResolutionRequest,
+        idempotency_key: str = Header(
+            alias="Idempotency-Key", min_length=8, max_length=200
+        ),
+        user: AuthenticatedUser = Depends(owner_user),
+    ) -> dict:
+        proposal = calendar_manager.resolve(
+            user_id=user.id,
+            proposal_id=proposal_id,
+            request=request,
+            idempotency_key=idempotency_key,
+        )
+        action_copy = (
+            "Google Calendar에 등록했습니다."
+            if proposal.status == "COMPLETED"
+            else "일정 등록을 취소했습니다."
+        )
+        return {
+            "status": proposal.status,
+            "display_response": action_copy,
+            "proposal": proposal.model_dump(mode="json"),
+        }
+
     @application.post("/api/v1/chat/runs", response_model=JarvisResponse)
-    def run_chat(request: dict[str, object]) -> JarvisResponse:
-        normalized_request: dict[str, object] = dict(request)
+    def run_chat(
+        request: object = Body(default=None),
+        user: AuthenticatedUser = Depends(current_user),
+    ) -> JarvisResponse:
+        # Keep the HTTP boundary tolerant of older desktop shells and cached
+        # web clients.  A typed ``dict`` parameter makes FastAPI reject a
+        # JSON string/list before this compatibility layer can normalize it,
+        # which surfaces as an opaque 422 in the app.  The canonical contract
+        # is still enforced below by ChatRunRequest.model_validate().
+        if isinstance(request, dict):
+            normalized_request: dict[str, object] = dict(request)
+        elif isinstance(request, str) and request.strip():
+            normalized_request = {"content": request}
+        else:
+            normalized_request = {}
         if (
             "content" not in normalized_request
             and (
@@ -235,6 +598,11 @@ def create_app(
                 "user_message",
                 normalized_request.pop("message", None),
             )
+        if (
+            "content" not in normalized_request
+            and normalized_request.get("text") is not None
+        ):
+            normalized_request["content"] = normalized_request.pop("text")
         normalized_request.pop("message", None)
         normalized_request.pop("user_message", None)
         if (
@@ -256,25 +624,80 @@ def create_app(
             normalized_request["client_message_id"] = normalized_request.pop("message_id")
         normalized_request.pop("user_id", None)
         normalized_request.pop("userId", None)
+        # Older dashboard shells occasionally attach UI-only metadata. It is
+        # not part of the canonical chat contract and must not turn a valid
+        # request into a 422 merely because the shell was cached.
+        normalized_request = {
+            key: value
+            for key, value in normalized_request.items()
+            if key in {"conversation_id", "client_message_id", "content"}
+        }
+        if (
+            "client_message_id" not in normalized_request
+            and isinstance(normalized_request.get("content"), str)
+            and normalized_request["content"].strip()
+        ):
+            conversation_key = normalized_request.get("conversation_id") or "default"
+            normalized_request["client_message_id"] = (
+                "legacy-"
+                + sha256_text(
+                    f"{conversation_key}:{normalized_request['content']}"
+                )[:48]
+            )
+        if (
+            "client_message_id" in normalized_request
+            and normalized_request["client_message_id"] is not None
+            and not isinstance(normalized_request["client_message_id"], str)
+        ):
+            normalized_request["client_message_id"] = str(
+                normalized_request["client_message_id"]
+            )
+        if (
+            "conversation_id" in normalized_request
+            and normalized_request["conversation_id"] is not None
+            and not isinstance(normalized_request["conversation_id"], str)
+        ):
+            normalized_request["conversation_id"] = str(
+                normalized_request["conversation_id"]
+            )
         try:
             payload = ChatRunRequest.model_validate(normalized_request)
         except ValidationError as error:
             raise HTTPException(status_code=422, detail=error.errors())
 
-        return orchestrator.handle_chat(payload)
+        if is_calendar_request(payload.content) and not user.is_owner:
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "OWNER_ACCESS_REQUIRED",
+                    "detail": "Google Calendar is available only to the owner account",
+                },
+            )
+        return orchestrator_for(
+            user.id,
+            calendar_access=user.is_owner,
+        ).handle_chat(payload)
 
     @application.get("/api/v1/runs/{run_id}")
-    def get_run(run_id: str) -> dict:
-        return orchestrator.get_run_response(run_id)
+    def get_run(
+        run_id: str,
+        user: AuthenticatedUser = Depends(current_user),
+    ) -> dict:
+        return orchestrator_for(user.id).get_run_response(run_id)
 
     # Backward-compatible polling endpoint kept for clients that still use the
     # previous status URL shape. The canonical path is /api/v1/runs/{run_id}.
     @application.get("/api/v1/chat/runs/{run_id}")
-    def get_run_legacy_alias(run_id: str) -> dict:
-        return orchestrator.get_run_response(run_id)
+    def get_run_legacy_alias(
+        run_id: str,
+        user: AuthenticatedUser = Depends(current_user),
+    ) -> dict:
+        return orchestrator_for(user.id).get_run_response(run_id)
 
     @application.get("/api/v1/runs")
-    def get_run_missing_id() -> dict:
+    def get_run_missing_id(
+        _: AuthenticatedUser = Depends(current_user),
+    ) -> dict:
         return _problem(
             status_code=400,
             code="RUN_ID_REQUIRED",
@@ -282,7 +705,9 @@ def create_app(
         )
 
     @application.get("/api/v1/chat/runs")
-    def get_legacy_run_missing_id() -> dict:
+    def get_legacy_run_missing_id(
+        _: AuthenticatedUser = Depends(current_user),
+    ) -> dict:
         return _problem(
             status_code=400,
             code="RUN_ID_REQUIRED",
@@ -293,27 +718,36 @@ def create_app(
         )
 
     @application.get("/api/v1/reports")
-    def list_reports(limit: int = 50) -> list[dict]:
-        return reports.list_reports(user_id=database.default_user_id, limit=limit)
+    def list_reports(
+        limit: int = 50,
+        user: AuthenticatedUser = Depends(current_user),
+    ) -> list[dict]:
+        return reports.list_reports(user_id=user.id, limit=limit)
 
     @application.get("/api/v1/reports/{report_id}")
-    def get_report(report_id: str) -> dict:
+    def get_report(
+        report_id: str,
+        user: AuthenticatedUser = Depends(current_user),
+    ) -> dict:
         return reports.get_report(
-            user_id=database.default_user_id,
+            user_id=user.id,
             report_id=report_id,
         )
 
     @application.get("/api/v1/dashboard/summary")
-    def dashboard_summary() -> dict:
-        return dashboard.summary(user_id=database.default_user_id)
+    def dashboard_summary(
+        user: AuthenticatedUser = Depends(current_user),
+    ) -> dict:
+        return dashboard.summary(user_id=user.id)
 
     @application.get("/api/v1/dashboard/activities")
     def dashboard_activities(
         limit: int = Query(default=20, ge=1, le=100),
         offset: int = Query(default=0, ge=0),
+        user: AuthenticatedUser = Depends(current_user),
     ) -> dict:
         return dashboard.recent_activities(
-            user_id=database.default_user_id,
+            user_id=user.id,
             limit=limit,
             offset=offset,
         )
@@ -322,26 +756,35 @@ def create_app(
     def dashboard_projects(
         limit: int = Query(default=20, ge=1, le=100),
         offset: int = Query(default=0, ge=0),
+        user: AuthenticatedUser = Depends(current_user),
     ) -> dict:
         return dashboard.projects(
-            user_id=database.default_user_id,
+            user_id=user.id,
             limit=limit,
             offset=offset,
         )
 
     @application.get("/api/v1/dashboard/projects/{project_id}")
-    def dashboard_project_detail(project_id: str) -> dict:
+    def dashboard_project_detail(
+        project_id: str,
+        user: AuthenticatedUser = Depends(current_user),
+    ) -> dict:
         return dashboard.project_detail(
-            user_id=database.default_user_id,
+            user_id=user.id,
             project_id=project_id,
         )
 
     @application.get("/api/v1/dashboard/provider")
-    def dashboard_provider() -> dict:
-        return dashboard.provider_status()
+    def dashboard_provider(
+        user: AuthenticatedUser = Depends(current_user),
+    ) -> dict:
+        return dashboard.provider_status(user_id=user.id)
 
     @application.get("/api/v1/suggestions")
-    def suggestions(limit: int = Query(default=3, ge=1, le=3)) -> dict:
+    def suggestions(
+        limit: int = Query(default=3, ge=1, le=3),
+        user: AuthenticatedUser = Depends(current_user),
+    ) -> dict:
         return {
             "items": [
                 {
@@ -352,7 +795,7 @@ def create_app(
                     "status": item.status,
                 }
                 for item in event_engine.suggestions(
-                    user_id=database.default_user_id,
+                    user_id=user.id,
                     limit=limit,
                 )
             ],
@@ -360,7 +803,10 @@ def create_app(
         }
 
     @application.post("/api/v1/suggestions/{suggestion_id}/dismiss")
-    def dismiss_suggestion(suggestion_id: str) -> dict:
+    def dismiss_suggestion(
+        suggestion_id: str,
+        user: AuthenticatedUser = Depends(current_user),
+    ) -> dict:
         with database.transaction() as connection:
             updated = connection.execute(
                 """
@@ -371,7 +817,7 @@ def create_app(
                 (
                     utc_iso(database.clock.now_utc()),
                     suggestion_id,
-                    database.default_user_id,
+                    user.id,
                 ),
             ).rowcount
         if updated != 1:
@@ -379,12 +825,16 @@ def create_app(
         return {"id": suggestion_id, "status": "DISMISSED"}
 
     @application.get("/api/v1/provider")
-    def dashboard_provider_compat() -> dict:
+    def dashboard_provider_compat(
+        user: AuthenticatedUser = Depends(current_user),
+    ) -> dict:
         # Backward-compatible alias for older clients/automation scripts.
-        return dashboard.provider_status()
+        return dashboard.provider_status(user_id=user.id)
 
     @application.get("/api/v1/skills")
-    def list_skills() -> dict:
+    def list_skills(
+        _: AuthenticatedUser = Depends(current_user),
+    ) -> dict:
         items: list[dict] = []
         for name, definition in sorted(skill_registry.definitions().items()):
             connection = database.connect()
@@ -424,11 +874,12 @@ def create_app(
         clarification_id: str,
         request: ResolveClarificationRequest,
         idempotency_key: str = Header(alias="Idempotency-Key"),
+        user: AuthenticatedUser = Depends(current_user),
     ) -> JarvisResponse:
         payload = request.model_dump(mode="json") | {
             "clarification_id": clarification_id
         }
-        return orchestrator.resolve_clarification(
+        return orchestrator_for(user.id).resolve_clarification(
             clarification_id,
             request,
             idempotency_key=idempotency_key,
@@ -443,10 +894,11 @@ def create_app(
         activity_id: str,
         request: RelinkActivityRequest,
         idempotency_key: str = Header(alias="Idempotency-Key"),
+        user: AuthenticatedUser = Depends(current_user),
     ) -> RelinkActivityResponse:
         payload = request.model_dump(mode="json") | {"activity_id": activity_id}
         result = work_manager.relink_activity(
-            user_id=database.default_user_id,
+            user_id=user.id,
             activity_id=activity_id,
             target_work_item_id=request.target_work_item_id,
             expected_activity_version=request.expected_activity_version,
@@ -458,7 +910,7 @@ def create_app(
         )
         try:
             event_engine.emit(
-                user_id=database.default_user_id,
+                user_id=user.id,
                 event=DomainEvent(
                     event_type="ACTIVITY_RELINKED",
                     aggregate_type="ACTIVITY",
@@ -469,6 +921,62 @@ def create_app(
         except Exception:
             pass
         return result
+
+    @application.exception_handler(InvalidCredentials)
+    async def invalid_credentials(_, exc: InvalidCredentials):
+        return _problem(401, "INVALID_CREDENTIALS", str(exc))
+
+    @application.exception_handler(InvalidRecoveryCode)
+    async def invalid_recovery_code(_, __: InvalidRecoveryCode):
+        return _problem(
+            401,
+            "INVALID_RECOVERY_CODE",
+            "invalid username or recovery code",
+        )
+
+    @application.exception_handler(PasswordReuseNotAllowed)
+    async def password_reuse_not_allowed(_, exc: PasswordReuseNotAllowed):
+        return _problem(422, "PASSWORD_REUSE_NOT_ALLOWED", str(exc))
+
+    @application.exception_handler(LoginRateLimited)
+    async def login_rate_limited(_, exc: LoginRateLimited):
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(
+            status_code=429,
+            headers={"Retry-After": str(exc.retry_after_seconds)},
+            content={
+                "error": {
+                    "code": "TOO_MANY_LOGIN_ATTEMPTS",
+                    "detail": "too many login attempts; try again later",
+                }
+            },
+        )
+
+    @application.exception_handler(RecoveryRateLimited)
+    async def recovery_rate_limited(_, exc: RecoveryRateLimited):
+        from fastapi.responses import JSONResponse
+
+        return JSONResponse(
+            status_code=429,
+            headers={"Retry-After": str(exc.retry_after_seconds)},
+            content={
+                "error": {
+                    "code": "TOO_MANY_RECOVERY_ATTEMPTS",
+                    "detail": "too many recovery attempts; try again later",
+                }
+            },
+        )
+
+    @application.exception_handler(ConversationCreationConflict)
+    async def conversation_creation_conflict(
+        _, exc: ConversationCreationConflict
+    ):
+        return _problem(409, "IDEMPOTENCY_KEY_CONFLICT", str(exc))
+
+    @application.exception_handler(UsernameAlreadyExists)
+    async def username_already_exists(_, exc: UsernameAlreadyExists):
+        return _problem(409, "USERNAME_TAKEN", str(exc))
 
     @application.exception_handler(DuplicateMessageConflict)
     async def duplicate_message_conflict(_, exc: DuplicateMessageConflict):
@@ -535,6 +1043,26 @@ def create_app(
     @application.exception_handler(SkillRegistryError)
     async def skill_registry_error(_, exc: SkillRegistryError):
         return _problem(503, "SKILL_RUNTIME_FAILED", str(exc))
+
+    @application.exception_handler(CalendarConfigurationError)
+    async def calendar_configuration_error(_, exc: CalendarConfigurationError):
+        return _problem(503, "GOOGLE_CALENDAR_NOT_CONFIGURED", str(exc))
+
+    @application.exception_handler(CalendarDraftValidationError)
+    async def calendar_draft_validation_error(_, exc: CalendarDraftValidationError):
+        return _problem(422, "CALENDAR_DRAFT_INVALID", str(exc))
+
+    @application.exception_handler(CalendarOperationInProgress)
+    async def calendar_operation_in_progress(_, exc: CalendarOperationInProgress):
+        return _problem(409, "CALENDAR_OPERATION_IN_PROGRESS", str(exc))
+
+    @application.exception_handler(CalendarExecutionUncertain)
+    async def calendar_execution_uncertain(_, exc: CalendarExecutionUncertain):
+        return _problem(409, "CALENDAR_EXECUTION_UNCERTAIN", str(exc))
+
+    @application.exception_handler(CalendarProviderError)
+    async def calendar_provider_error(_, exc: CalendarProviderError):
+        return _problem(503, "GOOGLE_CALENDAR_FAILED", str(exc))
 
     @application.exception_handler(sqlite3.OperationalError)
     async def sqlite_operational_error(_, exc: sqlite3.OperationalError):

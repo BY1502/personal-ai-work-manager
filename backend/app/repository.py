@@ -51,6 +51,7 @@ class RunIntake:
     stored_provider_name: str | None
     stored_model_version: str | None
     stored_prompt_version: str | None
+    retry_skill: bool = False
 
 
 @dataclass
@@ -155,6 +156,12 @@ class WorkRepository:
                     stored_provider_name=(run["provider_name"] if run else None),
                     stored_model_version=(run["model_version"] if run else None),
                     stored_prompt_version=(run["prompt_version"] if run else None),
+                    retry_skill=bool(
+                        existing_response is None
+                        and run
+                        and run["status"] in {"FAILED", "INTERRUPTED_RETRYABLE"}
+                        and run["structured_plan_json"] is None
+                    ),
                 )
 
             next_sequence = connection.execute(
@@ -212,6 +219,14 @@ class WorkRepository:
                     message_id,
                     now,
                 ),
+            )
+            connection.execute(
+                """
+                UPDATE conversations
+                SET updated_at = ?, version = version + 1
+                WHERE id = ? AND user_id = ?
+                """,
+                (now, resolved_conversation_id, user_id),
             )
             self._append_event(
                 connection,
@@ -311,6 +326,7 @@ class WorkRepository:
         max_iterations: int,
         input_digest: str,
         context_digest: str,
+        allow_retry: bool = False,
     ) -> dict:
         """Create or resume the single persisted Skill step for a Run."""
 
@@ -325,30 +341,76 @@ class WorkRepository:
                 (run_id, step_key, user_id),
             ).fetchone()
             if existing is not None:
-                if (
-                    existing["skill_name"] != skill_name
-                    or existing["skill_version"] != skill_version
-                    or existing["input_digest"] != input_digest
-                    or existing["context_digest"] != context_digest
-                ):
-                    raise VersionConflict("stored Skill execution input differs")
                 if existing["state"] == "RUNNING":
                     raise RunInProgress(run_id)
-                if existing["state"] in {"FAILED", "INTERRUPTED"}:
+                if allow_retry and existing["state"] == "COMPLETED":
+                    if (
+                        existing["skill_name"] != skill_name
+                        or existing["skill_version"] != skill_version
+                    ):
+                        raise VersionConflict("stored Skill definition differs")
                     connection.execute(
                         """
                         UPDATE skill_executions
                         SET state = 'PENDING', iteration = 0, error_code = NULL,
                             output_json = NULL, output_digest = NULL,
+                            model_profile = ?, max_iterations = ?,
+                            input_digest = ?, context_digest = ?,
                             updated_at = ?, completed_at = NULL
                         WHERE id = ? AND user_id = ?
                         """,
-                        (now, existing["id"], user_id),
+                        (
+                            model_profile,
+                            max_iterations,
+                            input_digest,
+                            context_digest,
+                            now,
+                            existing["id"],
+                            user_id,
+                        ),
                     )
                     existing = connection.execute(
                         "SELECT * FROM skill_executions WHERE id = ?",
                         (existing["id"],),
                     ).fetchone()
+                if existing["state"] in {"FAILED", "INTERRUPTED"}:
+                    if (
+                        existing["skill_name"] != skill_name
+                        or existing["skill_version"] != skill_version
+                    ):
+                        raise VersionConflict("stored Skill definition differs")
+                    connection.execute(
+                        """
+                        UPDATE skill_executions
+                        SET state = 'PENDING', iteration = 0, error_code = NULL,
+                            output_json = NULL, output_digest = NULL,
+                            model_profile = ?, max_iterations = ?,
+                            input_digest = ?, context_digest = ?,
+                            updated_at = ?, completed_at = NULL
+                        WHERE id = ? AND user_id = ?
+                        """,
+                        (
+                            model_profile,
+                            max_iterations,
+                            input_digest,
+                            context_digest,
+                            now,
+                            existing["id"],
+                            user_id,
+                        ),
+                    )
+                    existing = connection.execute(
+                        "SELECT * FROM skill_executions WHERE id = ?",
+                        (existing["id"],),
+                    ).fetchone()
+                else:
+                    if (
+                        existing["skill_name"] != skill_name
+                        or existing["skill_version"] != skill_version
+                        or existing["input_digest"] != input_digest
+                        or existing["context_digest"] != context_digest
+                    ):
+                        raise VersionConflict("stored Skill execution input differs")
                 return dict(existing)
 
             execution_id = new_id("skexec")
@@ -738,6 +800,14 @@ class WorkRepository:
                     user_id,
                 ),
             )
+            connection.execute(
+                """
+                UPDATE conversations
+                SET updated_at = ?, version = version + 1
+                WHERE id = ? AND user_id = ?
+                """,
+                (now, response.conversation_id, user_id),
+            )
             self._append_event(
                 connection,
                 user_id=user_id,
@@ -747,6 +817,42 @@ class WorkRepository:
                 payload={"status": response.status},
                 now=now,
             )
+
+    def attach_run_audio(
+        self,
+        *,
+        user_id: str,
+        run_id: str,
+        expected_response: JarvisResponse,
+        audio_url: str,
+        duration_seconds: float | None,
+    ) -> None:
+        """Attach presentation metadata to an already-terminal chat result.
+
+        The CAS keeps this best-effort presentation update from reopening or
+        otherwise changing the run lifecycle and Canonical Memory status.
+        """
+        expected_json = expected_response.model_dump_json()
+        response = expected_response.model_copy(
+            update={
+                "audio_url": audio_url,
+                "audio_duration_seconds": duration_seconds,
+            }
+        )
+        with self.database.transaction() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE orchestration_runs
+                SET result_json = ?
+                WHERE id = ?
+                  AND user_id = ?
+                  AND status IN ('COMPLETED', 'NEEDS_CLARIFICATION')
+                  AND result_json = ?
+                """,
+                (response.model_dump_json(), run_id, user_id, expected_json),
+            )
+            if cursor.rowcount != 1:
+                raise VersionConflict("run response changed during audio synthesis")
 
     def record_context_link_correction(
         self,

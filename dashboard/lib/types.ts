@@ -78,6 +78,24 @@ export interface Clarification {
   candidates: ClarificationCandidate[];
 }
 
+export interface CalendarProposal {
+  proposal_id: string;
+  action: "CREATE";
+  status: string;
+  version: number;
+  title: string;
+  start_at: string;
+  end_at: string;
+  timezone: string;
+  requires_approval: boolean;
+}
+
+export interface CalendarResolutionResponse {
+  status: string;
+  display_response: string;
+  proposal: CalendarProposal;
+}
+
 export interface ReportSectionItem {
   text: string;
 }
@@ -114,6 +132,69 @@ export interface JarvisResponse {
   } | null;
 }
 
+export interface AuthUser {
+  id: string;
+  username: string;
+  display_name: string;
+  timezone: string;
+  locale: string;
+  is_owner: boolean;
+}
+
+export interface AuthResponse {
+  user: AuthUser;
+  legacy_data_claimed?: boolean;
+  recovery_code?: string;
+}
+
+export interface RecoveryCodeResponse {
+  recovery_code: string;
+}
+
+export interface ConversationListItem {
+  id: string;
+  title?: string | null;
+  created_at: string;
+  updated_at: string;
+  message_count: number;
+  is_default?: boolean;
+  request_count?: number;
+  last_message_preview?: string | null;
+}
+
+export interface ConversationCreateResponse {
+  conversation: ConversationListItem;
+  created: boolean;
+}
+
+export interface ConversationListResponse {
+  items: ConversationListItem[];
+  limit: number;
+  offset: number;
+  has_more: boolean;
+}
+
+export interface ConversationMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  server_sequence: number;
+  sequence_cursor?: number | null;
+  created_at: string;
+  response?: JarvisResponse | null;
+  client_message_id?: string | null;
+  run_id?: string | null;
+  run_status?: string | null;
+  status_url?: string | null;
+}
+
+export interface ConversationMessagesResponse {
+  conversation_id: string;
+  items: ConversationMessage[];
+  has_more: boolean;
+  next_before_sequence?: number | null;
+}
+
 export type MessageState = "sending" | "polling" | "complete" | "error";
 
 export interface ChatMessage {
@@ -124,6 +205,7 @@ export interface ChatMessage {
   retryContent?: string;
   clientMessageId?: string;
   clarification?: Clarification | null;
+  calendarProposal?: CalendarProposal | null;
   report?: ReportSnapshot | null;
   audioUrl?: string | null;
 }

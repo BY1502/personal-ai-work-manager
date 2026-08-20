@@ -88,8 +88,9 @@ class ToolRegistry:
 def build_default_tool_registry(
     *,
     database: Database,
+    calendar_gateway: Any | None = None,
 ) -> ToolRegistry:
-    """Register only bounded read capabilities for the first slice."""
+    """Register bounded read capabilities; no Worker receives a write Tool."""
 
     registry = ToolRegistry()
 
@@ -164,6 +165,20 @@ def build_default_tool_registry(
         finally:
             connection.close()
 
+    def calendar_events_list(payload: dict[str, Any], user_id: str) -> list[dict[str, Any]]:
+        del user_id
+        if calendar_gateway is None:
+            raise ToolExecutionError("Google Calendar is not configured")
+        time_min = str(payload.get("time_min", "")).strip()
+        time_max = str(payload.get("time_max", "")).strip()
+        if not time_min or not time_max:
+            raise ToolExecutionError("calendar time_min and time_max are required")
+        return calendar_gateway.list_events(
+            time_min=time_min,
+            time_max=time_max,
+            limit=_limit(payload.get("limit", 20), maximum=50),
+        )
+
     registry.register(
         ToolDefinition(
             name="project.search",
@@ -186,6 +201,14 @@ def build_default_tool_registry(
             permission=Permission.ALLOW,
             description="Read a bounded list of recent active Activities.",
             handler=recent_memory,
+        )
+    )
+    registry.register(
+        ToolDefinition(
+            name="calendar.events.list",
+            permission=Permission.ALLOW,
+            description="Read a bounded Google Calendar event range.",
+            handler=calendar_events_list,
         )
     )
     return registry

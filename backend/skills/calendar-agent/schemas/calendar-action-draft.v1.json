@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "calendar-action-draft.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "action",
+    "title",
+    "start_at",
+    "end_at",
+    "date_from",
+    "date_to",
+    "timezone"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "calendar-action-draft.v1"
+    },
+    "action": {
+      "enum": ["LIST", "CREATE"]
+    },
+    "title": {
+      "type": ["string", "null"],
+      "maxLength": 300
+    },
+    "start_at": {
+      "type": ["string", "null"],
+      "maxLength": 64
+    },
+    "end_at": {
+      "type": ["string", "null"],
+      "maxLength": 64
+    },
+    "date_from": {
+      "type": ["string", "null"],
+      "maxLength": 10
+    },
+    "date_to": {
+      "type": ["string", "null"],
+      "maxLength": 10
+    },
+    "timezone": {
+      "const": "Asia/Seoul"
+    }
+  }
+}

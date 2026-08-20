@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import sqlite3
+import stat
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -34,6 +36,7 @@ class Database:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute("PRAGMA busy_timeout = 5000")
+        self._restrict_storage_permissions()
         return connection
 
     @contextmanager
@@ -48,6 +51,7 @@ class Database:
             raise
         finally:
             connection.close()
+            self._restrict_storage_permissions()
 
     @contextmanager
     def runtime_lock(self) -> Iterator[None]:
@@ -105,6 +109,39 @@ class Database:
             connection.execute("PRAGMA optimize")
         finally:
             connection.close()
+            self._restrict_storage_permissions()
+
+    def _restrict_storage_permissions(self) -> None:
+        """Keep the exact SQLite database files private to the OS account.
+
+        HTTP authentication cannot protect a world-readable database on a
+        multi-account workstation. Opening each exact path and using fchmod
+        avoids a check-then-chmod race and also applies to a deliberately
+        configured symlink target without recursively touching its directory.
+        SQLite derives new WAL/SHM permissions from the main database; the
+        explicit suffix pass also repairs files created by older versions.
+        """
+
+        for candidate in (
+            self.path,
+            Path(f"{self.path}-wal"),
+            Path(f"{self.path}-shm"),
+        ):
+            flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+            flags |= getattr(os, "O_NONBLOCK", 0)
+            try:
+                descriptor = os.open(candidate, flags)
+            except FileNotFoundError:
+                continue
+            try:
+                current_mode = os.fstat(descriptor).st_mode
+                if (
+                    stat.S_ISREG(current_mode)
+                    and stat.S_IMODE(current_mode) != 0o600
+                ):
+                    os.fchmod(descriptor, 0o600)
+            finally:
+                os.close(descriptor)
 
     @staticmethod
     def _recover_interrupted_runs(

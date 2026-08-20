@@ -11,6 +11,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.database import Database
+from app.model_profiles import LOGICAL_MODEL_PROFILE_NAMES
 from app.models import ExtractionEnvelope
 from app.tools.registry import Permission, ToolRegistry
 from app.utils import canonical_json, new_id, utc_iso
@@ -285,11 +286,7 @@ class SkillRegistry:
         manifest = definition.manifest
         if set(manifest.permissions) != set(manifest.tools):
             raise SkillManifestError("permissions must match tools exactly")
-        if manifest.model_profile not in {
-            "jarvis-reasoning",
-            "worker-balanced",
-            "worker-fast",
-        }:
+        if manifest.model_profile not in LOGICAL_MODEL_PROFILE_NAMES:
             raise SkillManifestError(
                 f"unknown model profile: {manifest.model_profile}"
             )

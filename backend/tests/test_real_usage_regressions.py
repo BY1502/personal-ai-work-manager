@@ -64,6 +64,42 @@ def test_future_delivery_note_drops_unsupported_wait_clear_candidate() -> None:
     assert len(validated.activities) == 1
 
 
+@pytest.mark.parametrize("relative_token", ["TOMORROW", "NEXT_WEEK", "NEXT_MONTH"])
+def test_future_relative_activity_tokens_are_recorded_on_capture_day(
+    relative_token: str,
+) -> None:
+    """A future plan must not make an otherwise valid work note return 422.
+
+    Phase 1 has no due-date field.  The deterministic boundary therefore keeps
+    the activity on the capture day while preserving the original wording in
+    the source excerpt/summary.
+    """
+    source = "다음주에 ETRI연합트윈 로그인을 제거한 소스코드와 설치 스크립트를 전달해줄거야"
+    draft = FactGroupDraft(
+        project_mention="ETRI연합트윈",
+        work_item_mention="로그인 제거 소스코드 및 설치 스크립트 전달",
+        activities=[
+            ActivityDraft(
+                kind=ActivityKind.WORK_PERFORMED,
+                summary="로그인 제거 소스코드 및 설치 스크립트 전달",
+                occurred_on=relative_token,
+                source_excerpt=source,
+                derivation=Derivation.EXPLICIT,
+            )
+        ],
+        proposed_patch=WorkItemPatchDraft(status=WorkStatus.IN_PROGRESS),
+        source_excerpt=source,
+    )
+
+    validated = ExtractionValidator().validate_fact_group(
+        draft,
+        source_content=source,
+        today=date(2026, 8, 14),
+    )
+
+    assert validated.activities[0].occurred_on_local == date(2026, 8, 14)
+
+
 class _BlockingProvider(DeterministicTestProvider):
     def __init__(self, blocker: threading.Event) -> None:
         super().__init__()

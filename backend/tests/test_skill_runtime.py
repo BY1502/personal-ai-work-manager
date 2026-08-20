@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from app.database import Database
 from app.extraction import DeterministicTestProvider
 from app.main import create_app
+from app.model_profiles import LOGICAL_MODEL_PROFILE_NAMES, ModelProfileResolver
 from app.providers import ExtractionTimeoutError
 from app.skills.registry import SkillRegistry
 from app.tools.registry import (
@@ -52,6 +53,23 @@ class CapturingProvider(DeterministicTestProvider):
         return self.extract(content)
 
 
+class RetryAfterValidationProvider(DeterministicTestProvider):
+    """First worker result is schema-valid but rejected by the domain gate."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def extract_with_context(self, content: str, context: dict):
+        del context
+        payload = self.extract(content).model_dump(mode="json")
+        self.calls += 1
+        if self.calls == 1:
+            payload["fact_groups"][0]["activities"][0]["derivation"] = (
+                "LLM_INFERRED"
+            )
+        return payload
+
+
 def _chat(client: TestClient, content: str, message_id: str = "m1"):
     return client.post(
         "/api/v1/chat/runs",
@@ -68,6 +86,20 @@ def _counts(path: Path) -> dict[str, int]:
         }
     finally:
         connection.close()
+
+
+def test_all_logical_skill_profiles_share_one_configured_model() -> None:
+    class ConfiguredWorker:
+        provider_name = "local"
+        model_name = "qwen3.5:35b-a3b-q4_K_M"
+
+    profiles = ModelProfileResolver(ConfiguredWorker()).all()
+
+    assert set(profiles) == set(LOGICAL_MODEL_PROFILE_NAMES)
+    assert {
+        (profile.provider_name, profile.model_name)
+        for profile in profiles.values()
+    } == {("local", "qwen3.5:35b-a3b-q4_K_M")}
 
 
 def test_work_capture_vertical_slice_uses_registry_runtime_and_phase1_apply(tmp_path: Path) -> None:
@@ -107,6 +139,40 @@ def test_work_capture_vertical_slice_uses_registry_runtime_and_phase1_apply(tmp_
         connection.close()
 
 
+def test_legacy_chat_payload_aliases_and_ui_metadata_are_tolerated(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "legacy-chat.sqlite"
+    app = create_app(database_path=db_path, extractor=DeterministicTestProvider())
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/chat/runs",
+            json={
+                "text": "오늘 예측매니저 설치 가이드 수정했어.",
+                "ui_source": "cached-dashboard",
+                "conversationId": None,
+            },
+        )
+        assert response.status_code == 200
+        assert response.json()["status"] == "COMPLETED"
+
+
+def test_chat_accepts_plain_json_text_from_desktop_shell(tmp_path: Path) -> None:
+    """Older Spotlight shells sometimes POST the text itself, not an object."""
+    app = create_app(
+        database_path=tmp_path / "plain-chat.sqlite",
+        extractor=DeterministicTestProvider(),
+    )
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/v1/chat/runs",
+            content='"오늘 예측매니저 설치 가이드 수정했어."',
+            headers={"Content-Type": "application/json"},
+        )
+        assert response.status_code == 200
+        assert response.json()["status"] == "COMPLETED"
+
+
 def test_runtime_loads_skill_body_and_bounded_context_package(tmp_path: Path) -> None:
     provider = CapturingProvider()
     app = create_app(database_path=tmp_path / "context.sqlite", extractor=provider)
@@ -118,6 +184,29 @@ def test_runtime_loads_skill_body_and_bounded_context_package(tmp_path: Path) ->
     assert "# Work Capture" in provider.context["skill"]["instructions"]
     assert "context_package" in provider.context
     assert "content" not in provider.context["context_package"]["request"]
+
+
+def test_failed_validation_replay_refreshes_completed_skill_output(
+    tmp_path: Path,
+) -> None:
+    provider = RetryAfterValidationProvider()
+    db_path = tmp_path / "retry-after-validation.sqlite"
+    app = create_app(database_path=db_path, extractor=provider)
+    with TestClient(app) as client:
+        first = _chat(client, "오늘 예측매니저 설치 가이드 수정했어.", "retry-1")
+        assert first.status_code == 422
+        assert first.json()["error"]["code"] == "DETERMINISTIC_VALIDATION_FAILED"
+        second = _chat(client, "오늘 예측매니저 설치 가이드 수정했어.", "retry-1")
+        assert second.status_code == 200
+        assert second.json()["status"] == "COMPLETED"
+
+    assert provider.calls == 2
+    assert _counts(db_path) == {
+        "projects": 1,
+        "work_items": 1,
+        "activities": 1,
+        "change_audit": 3,
+    }
 
 
 def test_disabled_skill_does_not_execute_or_write(tmp_path: Path) -> None:

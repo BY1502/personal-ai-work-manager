@@ -2,9 +2,33 @@
 backend/data/*.db
 backend/data/*.db-*
 backend/data/*.lock
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+backups/
 backend/.env
 dashboard/.env
 .env
+**/.env.local
+/.local/
+/private/
+/compose.local.yaml
+/compose.override.yaml
+/.env.tts.local
+/tts/local.env
+
+# Local-only validation/correction fixtures may contain work content
+*.local.jsonl
+context-link-regressions*.jsonl
+validation-regressions*.jsonl
+
+# OAuth/private credential exports
+client_secret*.json
+credentials*.json
+oauth-token*.json
+*.pem
+*.key
 
 # Python
 backend/.venv/
@@ -31,3 +55,20 @@ dashboard/pnpm-debug.log*
 # Downloaded TTS model/audio data
 tts/models/
 tts/audio/
+*.npz
+*.gguf
+*.safetensors
+*.onnx
+*.onnx.json
+*.ckpt
+*.pt
+*.pth
+*.bin
+*.npy
+*.mlmodel
+*.mlmodelc/
+*.wav
+*.mp3
+*.flac
+*.m4a
+*.provenance.json

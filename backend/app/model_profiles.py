@@ -4,6 +4,13 @@ from dataclasses import dataclass
 from typing import Any
 
 
+# These names describe a Skill's intended role. They are deliberately not
+# separate model routes: one Backend process owns one configured LLM worker.
+LOGICAL_MODEL_PROFILE_NAMES = frozenset(
+    {"jarvis-reasoning", "worker-balanced", "worker-fast"}
+)
+
+
 @dataclass(frozen=True)
 class ModelProfile:
     name: str
@@ -13,7 +20,12 @@ class ModelProfile:
 
 
 class ModelProfileResolver:
-    """Maps stable Skill profile names to the configured Worker adapter."""
+    """Map every logical Skill profile to the one configured LLM worker.
+
+    SKILL.md owns role-specific instructions. Profile names remain in manifests
+    and execution logs for compatibility and observability, but they never
+    select a second provider or model.
+    """
 
     def __init__(self, worker: Any) -> None:
         provider_name = getattr(worker, "provider_name", "unknown")
@@ -25,7 +37,7 @@ class ModelProfileResolver:
                 model_name=model_name,
                 timeout_seconds=30.0,
             )
-            for name in ("jarvis-reasoning", "worker-balanced", "worker-fast")
+            for name in LOGICAL_MODEL_PROFILE_NAMES
         }
 
     def resolve(self, name: str) -> ModelProfile:

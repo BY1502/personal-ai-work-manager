@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import inspect
 import json
 import time
 from dataclasses import dataclass
@@ -94,6 +95,7 @@ class SkillRuntime:
         run_id: str,
         conversation_id: str,
         content: str,
+        allow_retry: bool = False,
     ) -> SkillExecutionResult:
         result = self.invoke(
             user_id=user_id,
@@ -102,6 +104,7 @@ class SkillRuntime:
             skill_name="work-capture",
             input_payload={"content": content},
             step_key="work-capture",
+            allow_retry=allow_retry,
         )
         if result.envelope is None:
             raise SkillOutputValidationError()
@@ -116,6 +119,7 @@ class SkillRuntime:
         skill_name: str,
         input_payload: dict[str, Any],
         step_key: str | None = None,
+        allow_retry: bool = False,
     ) -> SkillExecutionResult:
         definition = self.registry.require_enabled(skill_name)
         try:
@@ -132,6 +136,14 @@ class SkillRuntime:
             conversation_id=conversation_id,
             content=content,
             recent_days=definition.manifest.memory_scope.recent_days,
+            allowed_tools=list(definition.manifest.tools),
+            allowed_actions=[
+                "RETURN_WORK_FACT_DRAFT"
+                if definition.manifest.output_schema.endswith(
+                    "work-fact-draft.v1.json"
+                )
+                else "RETURN_SKILL_OUTPUT"
+            ],
         )
         input_schema = _load_schema(definition, definition.manifest.input_schema)
         output_schema = _load_schema(definition, definition.manifest.output_schema)
@@ -161,6 +173,7 @@ class SkillRuntime:
             max_iterations=definition.manifest.max_iterations,
             input_digest=input_digest,
             context_digest=context.digest,
+            allow_retry=allow_retry,
         )
         self.repository.append_skill_event(
             user_id=user_id,
@@ -229,6 +242,7 @@ class SkillRuntime:
                     input_payload=runtime_input,
                     content=content,
                     worker_context=worker_context,
+                    output_schema=output_schema,
                 )
                 output = _normalize_output(raw)
                 validate_json_schema(output, output_schema)
@@ -356,6 +370,7 @@ class SkillRuntime:
         input_payload: dict[str, Any],
         content: str,
         worker_context: dict[str, Any],
+        output_schema: dict[str, Any],
     ) -> Any:
         if definition.manifest.output_schema.endswith("work-fact-draft.v1.json"):
             return _with_timeout(
@@ -364,13 +379,17 @@ class SkillRuntime:
             )
         method = getattr(self.worker, "execute_skill", None)
         if callable(method):
+            kwargs = {
+                "skill_name": definition.manifest.name,
+                "model_profile": profile.name,
+                "input_payload": input_payload,
+                "context": worker_context,
+            }
+            parameters = inspect.signature(method).parameters.values()
+            if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters) or "output_schema" in inspect.signature(method).parameters:
+                kwargs["output_schema"] = output_schema
             return _with_timeout(
-                lambda: method(
-                    skill_name=definition.manifest.name,
-                    model_profile=profile.name,
-                    input_payload=input_payload,
-                    context=worker_context,
-                ),
+                lambda: method(**kwargs),
                 definition.manifest.timeout_seconds,
             )
         raise SkillRuntimeError(

@@ -7,8 +7,10 @@ services:
     environment:
       EXTRACTION_PROVIDER: ${EXTRACTION_PROVIDER:-local}
       LOCAL_LLM_BASE_URL: ${LOCAL_LLM_BASE_URL:-http://host.docker.internal:11434}
-      LOCAL_LLM_MODEL: ${LOCAL_LLM_MODEL:-qwen3:4b}
+      LOCAL_LLM_MODEL: ${LOCAL_LLM_MODEL:-qwen3.5:35b-a3b-q4_K_M}
       LOCAL_LLM_TIMEOUT_SECONDS: ${LOCAL_LLM_TIMEOUT_SECONDS:-30}
+      LOCAL_LLM_RETRY_ATTEMPTS: ${LOCAL_LLM_RETRY_ATTEMPTS:-2}
+      LOCAL_LLM_RETRY_BACKOFF_SECONDS: ${LOCAL_LLM_RETRY_BACKOFF_SECONDS:-0.25}
       LOCAL_LLM_CONTEXT_LENGTH: ${LOCAL_LLM_CONTEXT_LENGTH:-16384}
       LOCAL_LLM_MAX_OUTPUT_TOKENS: ${LOCAL_LLM_MAX_OUTPUT_TOKENS:-4096}
       EXTRACTION_MAX_CONCURRENT: ${EXTRACTION_MAX_CONCURRENT:-6}
@@ -18,22 +20,38 @@ services:
       EXTRACTION_API_MODEL: ${EXTRACTION_API_MODEL:-}
       EXTRACTION_API_TIMEOUT_SECONDS: ${EXTRACTION_API_TIMEOUT_SECONDS:-60}
       PHASE2_SKILL_RUNTIME_ENABLED: ${PHASE2_SKILL_RUNTIME_ENABLED:-true}
-      SKILL_AUTO_ENABLE: ${SKILL_AUTO_ENABLE:-work-capture}
+      SKILL_AUTO_ENABLE: ${SKILL_AUTO_ENABLE:-work-capture,calendar-agent}
       SKILLS_ROOT: ${SKILLS_ROOT:-/app/skills}
+      GOOGLE_CALENDAR_ENABLED: ${GOOGLE_CALENDAR_ENABLED:-false}
+      GOOGLE_CALENDAR_CLIENT_ID: ${GOOGLE_CALENDAR_CLIENT_ID:-}
+      GOOGLE_CALENDAR_CLIENT_SECRET: ${GOOGLE_CALENDAR_CLIENT_SECRET:-}
+      GOOGLE_CALENDAR_REFRESH_TOKEN: ${GOOGLE_CALENDAR_REFRESH_TOKEN:-}
+      GOOGLE_CALENDAR_ID: ${GOOGLE_CALENDAR_ID:-primary}
+      GOOGLE_CALENDAR_TIMEOUT_SECONDS: ${GOOGLE_CALENDAR_TIMEOUT_SECONDS:-20}
       TTS_ENABLED: ${TTS_ENABLED:-true}
       TTS_BRIDGE_URL: ${TTS_BRIDGE_URL:-http://tts:8765}
       TTS_PUBLIC_BASE_URL: ${TTS_PUBLIC_BASE_URL:-http://127.0.0.1:8766}
       TTS_PROVIDER_NAME: ${TTS_PROVIDER_NAME:-local-piper}
       TTS_MODEL_NAME: ${TTS_MODEL_NAME:-ko_KR-kss-medium}
       TTS_TIMEOUT_SECONDS: ${TTS_TIMEOUT_SECONDS:-30}
+      TTS_FALLBACK_BRIDGE_URL: ${TTS_FALLBACK_BRIDGE_URL:-}
+      TTS_FALLBACK_PUBLIC_BASE_URL: ${TTS_FALLBACK_PUBLIC_BASE_URL:-http://127.0.0.1:8766}
+      TTS_FALLBACK_PROVIDER_NAME: ${TTS_FALLBACK_PROVIDER_NAME:-local-piper}
+      TTS_FALLBACK_MODEL_NAME: ${TTS_FALLBACK_MODEL_NAME:-ko_KR-kss-medium}
+      TTS_FALLBACK_TIMEOUT_SECONDS: ${TTS_FALLBACK_TIMEOUT_SECONDS:-30}
       PERSONAL_AI_DB_PATH: /app/data/personal_ai.db
+      AUTH_REQUIRED: ${AUTH_REQUIRED:-true}
+      AUTH_ALLOW_REGISTRATION: ${AUTH_ALLOW_REGISTRATION:-true}
+      AUTH_SESSION_TTL_SECONDS: ${AUTH_SESSION_TTL_SECONDS:-2592000}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
       DASHBOARD_ALLOWED_ORIGINS: ${DASHBOARD_ALLOWED_ORIGINS:-http://localhost:3100,http://127.0.0.1:3100,http://localhost:3001,http://127.0.0.1:3001,http://localhost:3000,http://127.0.0.1:3000}
+      DASHBOARD_ALLOWED_ORIGIN_REGEX: ${DASHBOARD_ALLOWED_ORIGIN_REGEX:-}
     extra_hosts:
       - host.docker.internal:host-gateway
     volumes:
       - ./backend/data:/app/data
     ports:
-      - ${BACKEND_BIND:-0.0.0.0}:${BACKEND_PORT:-8100}:8000
+      - ${BACKEND_BIND:-127.0.0.1}:${BACKEND_PORT:-8100}:8000
     healthcheck:
       test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
       interval: 10s
@@ -56,7 +74,7 @@ services:
       - piper_models:/models
       - piper_audio:/data/audio
     ports:
-      - ${TTS_BIND:-0.0.0.0}:${TTS_PORT:-8766}:8765
+      - ${TTS_BIND:-127.0.0.1}:${TTS_PORT:-8766}:8765
     healthcheck:
       test: [CMD, python, -c, "import urllib.request,sys; r=urllib.request.urlopen('http://127.0.0.1:8765/api/health', timeout=2); sys.exit(0 if r.status == 200 else 1)"]
       interval: 10s
@@ -78,8 +96,8 @@ services:
       backend:
         condition: service_healthy
     ports:
-      - ${DASHBOARD_BIND:-0.0.0.0}:${DASHBOARD_PORT:-3100}:3000
-      - ${DASHBOARD_BIND:-0.0.0.0}:3001:3000
+      - ${DASHBOARD_BIND:-127.0.0.1}:${DASHBOARD_PORT:-3100}:3000
+      - ${DASHBOARD_BIND:-127.0.0.1}:3001:3000
     healthcheck:
       test: [CMD, node, -e, "fetch('http://127.0.0.1:3000').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
       interval: 10s

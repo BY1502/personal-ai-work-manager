@@ -5,6 +5,7 @@ import time
 from datetime import timedelta
 
 from app.context_linking import MemoryManager
+from app.calendar_agent import CalendarManager, is_calendar_request
 from app.event_engine import DomainEvent, EventEngine
 from app.extraction import ExtractionProvider
 from app.models import (
@@ -27,7 +28,7 @@ from app.utils import local_date
 from app.validation import ExtractionValidator
 from app.work_manager import WorkManager
 from app.work_queries import StructuredWorkQueryService
-from app.tts import LocalTTSBridge, TTSResult
+from app.tts import TTSProvider, TTSResult
 
 
 class UnsupportedResolution(ValueError):
@@ -53,7 +54,8 @@ class JarvisOrchestrator:
         reports: ReportManager,
         extractor: ExtractionProvider,
         skill_runtime: SkillRuntime | None = None,
-        tts: LocalTTSBridge | None = None,
+        calendar_manager: CalendarManager | None = None,
+        tts: TTSProvider | None = None,
         event_engine: EventEngine | None = None,
         validator: ExtractionValidator,
         user_id: str,
@@ -68,6 +70,7 @@ class JarvisOrchestrator:
         self.reports = reports
         self.extractor = extractor
         self.skill_runtime = skill_runtime
+        self.calendar_manager = calendar_manager
         self.tts = tts
         self.event_engine = event_engine
         self.validator = validator
@@ -146,6 +149,62 @@ class JarvisOrchestrator:
             prompt_version = intake.stored_prompt_version or getattr(
                 self.extractor, "prompt_version", "unknown"
             )
+            if (
+                self.calendar_manager is not None
+                and self.skill_runtime is not None
+                and is_calendar_request(request.content)
+            ):
+                failure_stage = "CALENDAR_INTERPRETATION"
+                self.repository.begin_interpretation(
+                    user_id=self.user_id,
+                    run_id=intake.run_id,
+                    provider_name=provider_name,
+                    model_version=model_version,
+                    prompt_version=prompt_version,
+                )
+                provider_started_at = time.monotonic()
+                skill_result = self.skill_runtime.invoke(
+                    user_id=self.user_id,
+                    run_id=intake.run_id,
+                    conversation_id=intake.conversation_id,
+                    skill_name="calendar-agent",
+                    input_payload={"content": request.content},
+                    step_key="calendar-agent",
+                    allow_retry=intake.retry_skill,
+                )
+                provider_duration_ms = skill_result.duration_ms
+                self.repository.complete_interpretation(
+                    user_id=self.user_id,
+                    run_id=intake.run_id,
+                    duration_ms=provider_duration_ms,
+                )
+                failure_stage = "CALENDAR_POLICY"
+                calendar_result = self.calendar_manager.handle_draft(
+                    user_id=self.user_id,
+                    run_id=intake.run_id,
+                    output=skill_result.output,
+                    list_tool=lambda payload: self.skill_runtime.execute_tool(
+                        user_id=self.user_id,
+                        run_id=intake.run_id,
+                        skill_name="calendar-agent",
+                        tool_name="calendar.events.list",
+                        payload=payload,
+                    ),
+                )
+                response = JarvisResponse(
+                    run_id=intake.run_id,
+                    conversation_id=intake.conversation_id,
+                    status="COMPLETED",
+                    display_response=calendar_result.display_response,
+                    voice_response=calendar_result.voice_response,
+                    data=calendar_result.data,
+                )
+                failure_stage = "RESPONSE_PERSISTENCE"
+                return self._persist_response(
+                    run_id=intake.run_id,
+                    response=response,
+                    memory_status=calendar_result.memory_status,
+                )
             if intake.stored_plan is None:
                 failure_stage = "INTERPRETATION"
                 self.repository.begin_interpretation(
@@ -162,6 +221,7 @@ class JarvisOrchestrator:
                         run_id=intake.run_id,
                         conversation_id=intake.conversation_id,
                         content=request.content,
+                        allow_retry=intake.retry_skill,
                     )
                     envelope = skill_result.envelope
                     provider_duration_ms = skill_result.duration_ms
@@ -407,13 +467,12 @@ class JarvisOrchestrator:
         response: JarvisResponse,
         memory_status: str,
     ) -> JarvisResponse:
-        """Attach optional voice presentation, then persist the final response.
+        """Persist the terminal result before optional voice presentation.
 
-        TTS is deliberately after all canonical work has been applied and is
-        best-effort. A bridge outage can remove an audio affordance, but can
-        never roll back or block Structured Memory.
+        TTS is deliberately after both Canonical Memory and the run lifecycle
+        have completed. A slow bridge can delay the first HTTP response, but a
+        retry or restart sees the terminal text result and never reapplies work.
         """
-        response = self._attach_tts(run_id=run_id, response=response)
         self.repository.complete_run(
             user_id=self.user_id,
             run_id=run_id,
@@ -439,7 +498,21 @@ class JarvisOrchestrator:
                 # Trigger diagnostics must never turn a completed work write
                 # into a failed chat request.
                 pass
-        return response
+        voiced_response = self._attach_tts(run_id=run_id, response=response)
+        if voiced_response.audio_url:
+            try:
+                self.repository.attach_run_audio(
+                    user_id=self.user_id,
+                    run_id=run_id,
+                    expected_response=response,
+                    audio_url=voiced_response.audio_url,
+                    duration_seconds=voiced_response.audio_duration_seconds,
+                )
+            except Exception:
+                # The terminal text result is already durable. Presentation
+                # persistence must not turn it back into a failed request.
+                pass
+        return voiced_response
 
     def _attach_tts(self, *, run_id: str, response: JarvisResponse) -> JarvisResponse:
         if self.tts is None or not response.voice_response.strip():
@@ -460,6 +533,21 @@ class JarvisOrchestrator:
                 # turn a successful text/canonical operation into an error.
                 pass
             return response
+        if result.fallback_used:
+            try:
+                self.repository.append_skill_event(
+                    user_id=self.user_id,
+                    run_id=run_id,
+                    event_type="TTS_FALLBACK_USED",
+                    public_summary="The preferred local voice was unavailable; the fallback voice was used.",
+                    payload={
+                        "primary_provider": self.tts.provider_name,
+                        "fallback_provider": result.provider_name,
+                        "error_code": result.primary_error_code,
+                    },
+                )
+            except Exception:
+                pass
         return response.model_copy(
             update={
                 "audio_url": result.audio_url,

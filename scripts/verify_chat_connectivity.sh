@@ -6,6 +6,25 @@ BACKEND_BASE="${BACKEND_BASE_URL:-}"
 ITERATIONS="${1:-20}"
 TIMEOUT="${2:-180}"
 STRESS_TEST="${3:-0}"
+AUTH_USERNAME="${BY_USERNAME:-}"
+AUTH_PASSWORD="${BY_PASSWORD:-}"
+COOKIE_JAR=""
+AUTH_BODY=""
+AUTHENTICATED=0
+
+cleanup() {
+  if [ "$AUTHENTICATED" = "1" ] && [ -n "$COOKIE_JAR" ]; then
+    curl -sS --max-time 5 -b "$COOKIE_JAR" \
+      -X POST "${API_BASE}/api/v1/auth/logout" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$COOKIE_JAR" ]; then
+    rm -f "$COOKIE_JAR"
+  fi
+  if [ -n "$AUTH_BODY" ]; then
+    rm -f "$AUTH_BODY"
+  fi
+}
+trap cleanup EXIT
 
 DASHBOARD_PORT_HINT="${DASHBOARD_PORT:-3100}"
 if [ -z "$BACKEND_BASE" ]; then
@@ -26,20 +45,53 @@ if ! command -v python3 >/dev/null 2>&1; then
   exit 1
 fi
 
+if [ -z "$AUTH_USERNAME" ] || [ -z "$AUTH_PASSWORD" ]; then
+  echo "인증된 Chat 점검에는 BY_USERNAME과 BY_PASSWORD가 필요합니다." >&2
+  exit 1
+fi
+
+COOKIE_JAR="$(mktemp)"
+AUTH_BODY="$(mktemp)"
+chmod 600 "$COOKIE_JAR" "$AUTH_BODY"
+AUTH_USERNAME="$AUTH_USERNAME" AUTH_PASSWORD="$AUTH_PASSWORD" \
+  python3 - "$AUTH_BODY" <<'PY'
+import json
+import os
+import sys
+
+with open(sys.argv[1], "w", encoding="utf-8") as destination:
+    json.dump(
+        {"username": os.environ["AUTH_USERNAME"], "password": os.environ["AUTH_PASSWORD"]},
+        destination,
+    )
+PY
+
+echo "[auth] BY login"
+curl -fsS --max-time 10 \
+  -H 'Content-Type: application/json' \
+  -c "$COOKIE_JAR" -b "$COOKIE_JAR" \
+  --data-binary "@$AUTH_BODY" \
+  "${API_BASE}/api/v1/auth/login" >/dev/null
+AUTHENTICATED=1
+rm -f "$AUTH_BODY"
+AUTH_BODY=""
+
 echo "[1/5] API health"
 health_failed=0
 if ! curl -fsS --max-time 5 "${BACKEND_BASE}/health" >/dev/null; then
   health_failed=1
 fi
 if [ "$health_failed" -ne 0 ]; then
-  if ! curl -fsS --max-time 5 "${API_BASE}/api/v1/dashboard/provider" >/dev/null; then
+  if ! curl -fsS --max-time 5 -b "$COOKIE_JAR" \
+    "${API_BASE}/api/v1/dashboard/provider" >/dev/null; then
     echo "health check 실패: $BACKEND_BASE/health, $API_BASE/api/v1/dashboard/provider" >&2
     exit 1
   fi
 fi
 
 echo "[2/5] API provider"
-curl -fsS --max-time 5 "${API_BASE}/api/v1/dashboard/provider" >/dev/null
+curl -fsS --max-time 5 -b "$COOKIE_JAR" \
+  "${API_BASE}/api/v1/dashboard/provider" >/dev/null
 
 ok=0
 req=0
@@ -51,6 +103,7 @@ for i in $(seq 1 "${ITERATIONS}"); do
   req=$((req+1))
   body_file="$(mktemp)"
   code=$(curl -sS -m "${TIMEOUT}" -o "${body_file}" -w '%{http_code}' \
+    -b "$COOKIE_JAR" \
     -H 'Content-Type: application/json' \
     -d "{\"client_message_id\":\"verify-${i}-$(date +%s%N)\",\"content\":\"연결검증 샘플\"}" \
     "${API_BASE}/api/v1/chat/runs" || true)
@@ -89,6 +142,7 @@ if [ "$STRESS_TEST" != "0" ]; then
     printf '%s' "${payload}" > "${payload_file}"
     (
       curl -sS -m 20 -H 'Content-Type: application/json' -d "@${payload_file}" \
+        -b "$COOKIE_JAR" \
         "${API_BASE}/api/v1/chat/runs" -o "${body_file}" -w '%{http_code}' > "${code_file}" || true
     ) >/dev/null 2>&1 &
   done

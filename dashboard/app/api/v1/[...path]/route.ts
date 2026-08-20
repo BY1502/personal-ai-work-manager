@@ -60,6 +60,7 @@ async function proxy(method: string, request: NextRequest, path: string[]): Prom
   const init: RequestInit = {
     method,
     headers,
+    cache: "no-store",
     redirect: "follow",
     signal: request.signal,
   };
@@ -72,20 +73,27 @@ async function proxy(method: string, request: NextRequest, path: string[]): Prom
     const response = await fetch(url.toString(), init);
     const responseBody = await response.arrayBuffer();
     const proxyHeaders = stripHopByHopHeaders(new Headers(response.headers));
+    proxyHeaders.set("Cache-Control", "private, no-store");
     return new NextResponse(responseBody, {
       status: response.status,
       statusText: response.statusText,
       headers: proxyHeaders,
     });
   } catch (error) {
+    console.error("BY backend proxy request failed", {
+      error: error instanceof Error ? error.name : "UnknownError",
+    });
     return NextResponse.json(
       {
         error: {
           code: "BACKEND_PROXY_ERROR",
-          detail: error instanceof Error ? error.message : "proxy request failed",
+          detail: "BY backend is unavailable",
         },
       },
-      { status: 502 },
+      {
+        status: 502,
+        headers: { "Cache-Control": "private, no-store" },
+      },
     );
   }
 }

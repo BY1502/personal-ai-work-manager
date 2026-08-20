@@ -10,9 +10,14 @@ import {
   type KeyboardEvent,
 } from "react";
 import {
+  AUTH_REQUIRED_EVENT,
   ApiError,
   createChatRun,
+  createConversation,
   getActivities,
+  getConversationHistory,
+  getConversations,
+  getCurrentUser,
   getProject,
   getProjects,
   getProviderStatus,
@@ -20,13 +25,30 @@ import {
   getReports,
   getRun,
   getSummary,
+  logout,
   resolveClarification,
+  resolveCalendarProposal,
 } from "@/lib/api";
+import {
+  WELCOME_MESSAGE,
+  chooseConversationId,
+  clearConversationHint,
+  findRestorableRun,
+  historyToChatMessages,
+  readConversationHint,
+  storeConversationHint,
+} from "@/lib/chat-history";
 import { pollRun } from "@/lib/polling";
+import AccountSecurityPanel from "./AccountSecurityPanel";
+import AuthGate, { type AuthenticatedResult } from "./AuthGate";
+import RecoveryCodeDialog from "./RecoveryCodeDialog";
 import type {
   ActivityItem,
+  AuthUser,
+  CalendarProposal,
   ChatMessage,
   Clarification,
+  ConversationListItem,
   DashboardSummary,
   JarvisResponse,
   PageResult,
@@ -48,14 +70,6 @@ const EMPTY_SUMMARY: DashboardSummary = {
   waiting: [],
   blocked: [],
   nextActions: [],
-};
-
-const INITIAL_MESSAGE: ChatMessage = {
-  id: "jarvis-welcome",
-  role: "assistant",
-  state: "complete",
-  content:
-    "안녕하세요. 오늘 한 일, 기다리는 답변, 다음에 해야 할 업무를 편하게 말씀해주세요.",
 };
 
 const QUICK_PROMPTS = [
@@ -103,6 +117,15 @@ function sleep(ms: number): Promise<void> {
 
 function friendlyError(error: unknown): string {
   if (error instanceof ApiError) {
+    if (error.code === "GOOGLE_CALENDAR_NOT_CONFIGURED") {
+      return "Google Calendar 연결이 필요합니다. 로컬 설정을 확인해주세요.";
+    }
+    if (error.code === "CALENDAR_EXECUTION_UNCERTAIN") {
+      return "등록 결과가 불확실해 중복 생성을 막았습니다. Google Calendar를 확인해주세요.";
+    }
+    if (error.code === "GOOGLE_CALENDAR_FAILED") {
+      return "Google Calendar 연결이 원활하지 않습니다. 잠시 후 다시 시도해주세요.";
+    }
     if (
       error.code === "EXTRACTION_TIMEOUT" ||
       error.code === "REQUEST_TIMEOUT" ||
@@ -161,7 +184,31 @@ function reportPrompt(
   return `${projectName} 프로젝트 보고서 만들어줘.`;
 }
 
+function conversationLabel(item: ConversationListItem, index: number): string {
+  const label = item.title?.trim() || item.last_message_preview?.trim();
+  if (label) return label.length > 28 ? `${label.slice(0, 28)}…` : label;
+  const created = new Date(item.created_at);
+  if (!Number.isNaN(created.getTime())) {
+    return `대화 ${new Intl.DateTimeFormat("ko-KR", {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(created)}`;
+  }
+  return `대화 ${index + 1}`;
+}
+
 export default function Dashboard() {
+  const [authStatus, setAuthStatus] = useState<
+    "loading" | "anonymous" | "authenticated"
+  >("loading");
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [logoutPending, setLogoutPending] = useState(false);
+  const [securityPanelOpen, setSecurityPanelOpen] = useState(false);
+  const [oneTimeRecoveryCode, setOneTimeRecoveryCode] = useState<string | null>(
+    null,
+  );
   const [summary, setSummary] = useState<DashboardSummary>(EMPTY_SUMMARY);
   const [activities, setActivities] = useState<PageResult<ActivityItem>>({
     items: [],
@@ -201,15 +248,23 @@ export default function Dashboard() {
   const [reportLoading, setReportLoading] = useState(false);
   const [rangeStart, setRangeStart] = useState("");
   const [rangeEnd, setRangeEnd] = useState("");
-  const [messages, setMessages] = useState<ChatMessage[]>([INITIAL_MESSAGE]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [chatHistoryLoading, setChatHistoryLoading] = useState(true);
   const [input, setInput] = useState("");
   const [conversationId, setConversationId] = useState<string | null>(null);
+  const [conversations, setConversations] = useState<ConversationListItem[]>([]);
+  const [conversationListLoading, setConversationListLoading] = useState(true);
+  const [creatingConversation, setCreatingConversation] = useState(false);
   const [resolvingClarification, setResolvingClarification] = useState<
     string | null
   >(null);
   const [clarificationError, setClarificationError] = useState<string | null>(
     null,
   );
+  const [calendarResolution, setCalendarResolution] = useState<string | null>(
+    null,
+  );
+  const [calendarError, setCalendarError] = useState<string | null>(null);
   const [newWorkClarification, setNewWorkClarification] = useState<
     string | null
   >(null);
@@ -221,15 +276,64 @@ export default function Dashboard() {
   const [isStandalone, setIsStandalone] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const activePollRef = useRef<AbortController | null>(null);
+  const activeChatRequestRef = useRef<AbortController | null>(null);
   const inFlightRef = useRef(false);
   const clarificationKeysRef = useRef(new Map<string, string>());
+  const sessionEpochRef = useRef(0);
+  const conversationEpochRef = useRef(0);
+  const conversationCreateKeyRef = useRef<string | null>(null);
+  const conversationCreateInFlightRef = useRef(false);
+  const userRef = useRef<AuthUser | null>(null);
 
   const isChatBusy = messages.some(
     (message) => message.state === "sending" || message.state === "polling",
   );
 
+  const clearPrivateUi = useCallback(() => {
+    sessionEpochRef.current += 1;
+    conversationEpochRef.current += 1;
+    activePollRef.current?.abort();
+    activePollRef.current = null;
+    activeChatRequestRef.current?.abort();
+    activeChatRequestRef.current = null;
+    inFlightRef.current = false;
+    clarificationKeysRef.current.clear();
+    setSummary(EMPTY_SUMMARY);
+    setActivities({ items: [], total: 0, limit: 6, offset: 0 });
+    setProjects({ items: [], total: 0, limit: 6, offset: 0 });
+    setReports([]);
+    setSelectedProject(null);
+    setSelectedReport(null);
+    setProjectLoading(false);
+    setReportLoading(false);
+    setMessages([]);
+    setConversationId(null);
+    setConversations([]);
+    setConversationListLoading(true);
+    setCreatingConversation(false);
+    setLogoutPending(false);
+    conversationCreateKeyRef.current = null;
+    conversationCreateInFlightRef.current = false;
+    setInput("");
+    setDashboardError(null);
+    setDashboardLoading(true);
+    setChatHistoryLoading(true);
+    setActivityPage(0);
+    setProjectPage(0);
+    setClarificationError(null);
+    setCalendarError(null);
+    setResolvingClarification(null);
+    setCalendarResolution(null);
+    setNewWorkClarification(null);
+    setNewProjectName("");
+    setNewWorkTitle("");
+    setSecurityPanelOpen(false);
+    setOneTimeRecoveryCode(null);
+  }, []);
+
   const loadDashboard = useCallback(
     async (options?: { quiet?: boolean; activityOffset?: number; projectOffset?: number }) => {
+      const requestEpoch = sessionEpochRef.current;
       if (!options?.quiet) setDashboardLoading(true);
       const activityOffset = options?.activityOffset ?? 0;
       const projectOffset = options?.projectOffset ?? 0;
@@ -240,6 +344,7 @@ export default function Dashboard() {
         getReports(20),
         getProviderStatus(),
       ]);
+      if (requestEpoch !== sessionEpochRef.current || !userRef.current) return;
       if (results[0].status === "fulfilled") setSummary(results[0].value);
       if (results[1].status === "fulfilled") setActivities(results[1].value);
       if (results[2].status === "fulfilled") setProjects(results[2].value);
@@ -293,16 +398,15 @@ export default function Dashboard() {
           Boolean((window.navigator as Navigator & { standalone?: boolean }).standalone)),
     );
     void navigator.serviceWorker?.register("/sw.js", { scope: "/" });
-    const storedConversation = window.localStorage.getItem(
-      "jarvis-conversation-id",
-    );
-    if (storedConversation) setConversationId(storedConversation);
-    void loadDashboard();
+    // Remove the former cross-user key. Conversation bodies are never kept in
+    // browser storage; the active id is namespaced after authentication.
+    window.localStorage.removeItem("jarvis-conversation-id");
     return () => {
       activePollRef.current?.abort();
+      activeChatRequestRef.current?.abort();
       window.removeEventListener("beforeinstallprompt", installable);
     };
-  }, [loadDashboard]);
+  }, []);
 
   const installBy = useCallback(async () => {
     if (!installPrompt) return;
@@ -317,12 +421,24 @@ export default function Dashboard() {
 
   const applyResponse = useCallback(
     (assistantId: string, response: JarvisResponse) => {
+      const activeUser = userRef.current;
+      if (!activeUser) return;
       setConversationId(response.conversation_id);
-      window.localStorage.setItem(
-        "jarvis-conversation-id",
+      storeConversationHint(
+        window.localStorage,
+        activeUser.id,
         response.conversation_id,
       );
       const report = response.data?.report || null;
+      const calendarData = response.data?.calendar;
+      const calendarProposal =
+        calendarData &&
+        typeof calendarData === "object" &&
+        "proposal" in calendarData &&
+        calendarData.proposal &&
+        typeof calendarData.proposal === "object"
+          ? (calendarData.proposal as CalendarProposal)
+          : null;
       setMessages((current) =>
         updateMessage(current, assistantId, {
           state: "complete",
@@ -330,22 +446,350 @@ export default function Dashboard() {
             ? `${REPORT_LABEL[report.report_type] || "업무보고"}를 정리했습니다.`
             : response.display_response,
           clarification: response.clarification || null,
+          calendarProposal,
           report,
           audioUrl: response.audio_url || null,
         }),
       );
       if (report) setSelectedReport(report);
       void loadDashboard({ quiet: true, activityOffset: 0, projectOffset: 0 });
+      const responseEpoch = sessionEpochRef.current;
+      const responseUserId = activeUser.id;
       if (selectedProject?.id) {
         void getProject(selectedProject.id)
-          .then(setSelectedProject)
-          .catch(() => setSelectedProject(null));
+          .then((project) => {
+            if (
+              responseEpoch === sessionEpochRef.current &&
+              userRef.current?.id === responseUserId
+            ) {
+              setSelectedProject(project);
+            }
+          })
+          .catch(() => {
+            if (
+              responseEpoch === sessionEpochRef.current &&
+              userRef.current?.id === responseUserId
+            ) {
+              setSelectedProject(null);
+            }
+          });
       }
+      void getConversations(30, 0)
+        .then((page) => {
+          if (
+            responseEpoch === sessionEpochRef.current &&
+            userRef.current?.id === responseUserId
+          ) {
+            setConversations(page.items);
+          }
+        })
+        .catch(() => undefined);
       setActivityPage(0);
       setProjectPage(0);
     },
     [loadDashboard, selectedProject?.id],
   );
+
+  const loadConversation = useCallback(
+    async (
+      nextUser: AuthUser,
+      selectedId: string,
+      requestEpoch: number,
+      requestConversationEpoch: number,
+    ) => {
+      try {
+        const history = await getConversationHistory(selectedId);
+        if (
+          requestEpoch !== sessionEpochRef.current ||
+          requestConversationEpoch !== conversationEpochRef.current ||
+          userRef.current?.id !== nextUser.id
+        ) {
+          return;
+        }
+        setConversationId(selectedId);
+        storeConversationHint(window.localStorage, nextUser.id, selectedId);
+        const restoredMessages = historyToChatMessages(history);
+        const restorableRun = findRestorableRun(history);
+
+        if (!restorableRun) {
+          setMessages(restoredMessages);
+          setChatHistoryLoading(false);
+          return;
+        }
+
+        const assistantId = `restored-run-${restorableRun.runId}`;
+        if (restorableRun.failed) {
+          setMessages([
+            ...restoredMessages,
+            {
+              id: assistantId,
+              role: "assistant",
+              content: "이 요청은 처리 중 문제가 생겼습니다. 다시 시도할 수 있어요.",
+              state: "error",
+              retryContent: restorableRun.clientMessageId
+                ? restorableRun.content
+                : undefined,
+              clientMessageId: restorableRun.clientMessageId || undefined,
+            },
+          ]);
+          setChatHistoryLoading(false);
+          return;
+        }
+
+        setMessages([
+          ...restoredMessages,
+          {
+            id: assistantId,
+            role: "assistant",
+            content: "BY가 업무 내용을 정리하고 있습니다…",
+            state: "polling",
+            retryContent: restorableRun.content,
+            clientMessageId: restorableRun.clientMessageId || undefined,
+          },
+        ]);
+        setChatHistoryLoading(false);
+        inFlightRef.current = true;
+        const controller = new AbortController();
+        activePollRef.current?.abort();
+        activePollRef.current = controller;
+        try {
+          const response = await pollRun({
+            getRun,
+            statusUrl: restorableRun.statusUrl,
+            signal: controller.signal,
+          });
+          if (
+            requestEpoch === sessionEpochRef.current &&
+            requestConversationEpoch === conversationEpochRef.current &&
+            userRef.current?.id === nextUser.id
+          ) {
+            applyResponse(assistantId, response);
+          }
+        } catch (error) {
+          if (
+            requestEpoch === sessionEpochRef.current &&
+            requestConversationEpoch === conversationEpochRef.current &&
+            userRef.current?.id === nextUser.id &&
+            !(error instanceof DOMException && error.name === "AbortError")
+          ) {
+            setMessages((current) =>
+              updateMessage(current, assistantId, {
+                content: friendlyError(error),
+                state: "error",
+              }),
+            );
+          }
+        } finally {
+          if (
+            requestEpoch === sessionEpochRef.current &&
+            requestConversationEpoch === conversationEpochRef.current
+          ) {
+            inFlightRef.current = false;
+          }
+        }
+      } catch (error) {
+        if (
+          requestEpoch !== sessionEpochRef.current ||
+          requestConversationEpoch !== conversationEpochRef.current ||
+          userRef.current?.id !== nextUser.id ||
+          (error instanceof ApiError && error.status === 401)
+        ) {
+          return;
+        }
+        clearConversationHint(window.localStorage, nextUser.id);
+        setConversationId(null);
+        setMessages([{ ...WELCOME_MESSAGE }]);
+        setChatHistoryLoading(false);
+        setDashboardError("이전 대화를 불러오지 못했습니다. 새 요청부터 이어갈 수 있어요.");
+      }
+    },
+    [applyResponse],
+  );
+
+  const restoreConversation = useCallback(
+    async (nextUser: AuthUser, requestEpoch: number) => {
+      setConversationListLoading(true);
+      try {
+        const conversationPage = await getConversations(30, 0);
+        if (
+          requestEpoch !== sessionEpochRef.current ||
+          userRef.current?.id !== nextUser.id
+        ) {
+          return;
+        }
+        setConversations(conversationPage.items);
+        setConversationListLoading(false);
+        const selectedId = chooseConversationId(
+          readConversationHint(window.localStorage, nextUser.id),
+          conversationPage.items,
+        );
+        if (!selectedId) {
+          clearConversationHint(window.localStorage, nextUser.id);
+          setMessages([{ ...WELCOME_MESSAGE }]);
+          setChatHistoryLoading(false);
+          return;
+        }
+        setConversationId(selectedId);
+        storeConversationHint(window.localStorage, nextUser.id, selectedId);
+        const requestConversationEpoch = ++conversationEpochRef.current;
+        await loadConversation(
+          nextUser,
+          selectedId,
+          requestEpoch,
+          requestConversationEpoch,
+        );
+      } catch (error) {
+        if (
+          requestEpoch !== sessionEpochRef.current ||
+          userRef.current?.id !== nextUser.id ||
+          (error instanceof ApiError && error.status === 401)
+        ) {
+          return;
+        }
+        setConversationListLoading(false);
+        setMessages([{ ...WELCOME_MESSAGE }]);
+        setChatHistoryLoading(false);
+        setDashboardError("대화 목록을 불러오지 못했습니다. 잠시 후 다시 시도해주세요.");
+      }
+    },
+    [loadConversation],
+  );
+
+  const switchConversation = useCallback(
+    (selectedId: string) => {
+      const activeUser = userRef.current;
+      if (!activeUser || !selectedId || selectedId === conversationId) return;
+      activePollRef.current?.abort();
+      activePollRef.current = null;
+      activeChatRequestRef.current?.abort();
+      activeChatRequestRef.current = null;
+      inFlightRef.current = false;
+      const requestConversationEpoch = ++conversationEpochRef.current;
+      const requestEpoch = sessionEpochRef.current;
+      setConversationId(selectedId);
+      storeConversationHint(window.localStorage, activeUser.id, selectedId);
+      setMessages([]);
+      setChatHistoryLoading(true);
+      setDashboardError(null);
+      void loadConversation(
+        activeUser,
+        selectedId,
+        requestEpoch,
+        requestConversationEpoch,
+      );
+    },
+    [conversationId, loadConversation],
+  );
+
+  const startNewConversation = useCallback(async () => {
+    const activeUser = userRef.current;
+    if (!activeUser || conversationCreateInFlightRef.current) return;
+    conversationCreateInFlightRef.current = true;
+    setCreatingConversation(true);
+    setDashboardError(null);
+    const requestEpoch = sessionEpochRef.current;
+    const idempotencyKey =
+      conversationCreateKeyRef.current || createId("conversation-create");
+    conversationCreateKeyRef.current = idempotencyKey;
+    try {
+      const result = await createConversation({ idempotencyKey });
+      if (
+        requestEpoch !== sessionEpochRef.current ||
+        userRef.current?.id !== activeUser.id
+      ) {
+        return;
+      }
+      conversationCreateKeyRef.current = null;
+      setConversations((current) => [
+        result.conversation,
+        ...current.filter((item) => item.id !== result.conversation.id),
+      ]);
+      switchConversation(result.conversation.id);
+    } catch (error) {
+      if (requestEpoch !== sessionEpochRef.current) return;
+      setDashboardError(friendlyError(error));
+    } finally {
+      if (requestEpoch === sessionEpochRef.current) {
+        conversationCreateInFlightRef.current = false;
+        setCreatingConversation(false);
+      }
+    }
+  }, [switchConversation]);
+
+  const beginAuthenticatedSession = useCallback(
+    (nextUser: AuthUser) => {
+      const previousUser = userRef.current;
+      if (previousUser && previousUser.id !== nextUser.id) {
+        clearConversationHint(window.localStorage, previousUser.id);
+      }
+      clearPrivateUi();
+      userRef.current = nextUser;
+      setUser(nextUser);
+      setAuthStatus("authenticated");
+      const requestEpoch = sessionEpochRef.current;
+      void loadDashboard();
+      void restoreConversation(nextUser, requestEpoch);
+    },
+    [clearPrivateUi, loadDashboard, restoreConversation],
+  );
+
+  const completeAuthentication = useCallback(
+    (result: AuthenticatedResult) => {
+      beginAuthenticatedSession(result.user);
+      if (result.recoveryCode) setOneTimeRecoveryCode(result.recoveryCode);
+    },
+    [beginAuthenticatedSession],
+  );
+
+  const leaveAuthenticatedSession = useCallback(() => {
+    const previousUser = userRef.current;
+    if (previousUser) {
+      clearConversationHint(window.localStorage, previousUser.id);
+    }
+    clearPrivateUi();
+    userRef.current = null;
+    setUser(null);
+    setAuthStatus("anonymous");
+  }, [clearPrivateUi]);
+
+  useEffect(() => {
+    let active = true;
+    const requireAuthentication = () => {
+      leaveAuthenticatedSession();
+    };
+    window.addEventListener(AUTH_REQUIRED_EVENT, requireAuthentication);
+    void getCurrentUser()
+      .then((currentUser) => {
+        if (active) beginAuthenticatedSession(currentUser);
+      })
+      .catch(() => {
+        if (!active) return;
+        requireAuthentication();
+      });
+    return () => {
+      active = false;
+      window.removeEventListener(AUTH_REQUIRED_EVENT, requireAuthentication);
+    };
+  }, [beginAuthenticatedSession, leaveAuthenticatedSession]);
+
+  const signOut = useCallback(async () => {
+    if (logoutPending) return;
+    const actionUserId = userRef.current?.id;
+    if (!actionUserId) return;
+    const actionEpoch = sessionEpochRef.current;
+    const actionIsCurrent = () =>
+      actionEpoch === sessionEpochRef.current &&
+      userRef.current?.id === actionUserId;
+    setLogoutPending(true);
+    try {
+      await logout();
+      if (actionIsCurrent()) leaveAuthenticatedSession();
+    } catch (error) {
+      if (actionIsCurrent()) setDashboardError(friendlyError(error));
+    } finally {
+      if (actionIsCurrent()) setLogoutPending(false);
+    }
+  }, [leaveAuthenticatedSession, logoutPending]);
 
   const sendMessage = useCallback(
     async (
@@ -353,7 +797,23 @@ export default function Dashboard() {
       retry?: { assistantId: string; clientMessageId: string },
     ) => {
       const content = rawContent.trim();
-      if (!content || isChatBusy || inFlightRef.current) return;
+      if (
+        !content ||
+        !userRef.current ||
+        chatHistoryLoading ||
+        isChatBusy ||
+        inFlightRef.current
+      ) return;
+      const requestUserId = userRef.current.id;
+      const requestEpoch = sessionEpochRef.current;
+      const requestConversationEpoch = conversationEpochRef.current;
+      const requestIsCurrent = () =>
+        requestEpoch === sessionEpochRef.current &&
+        requestConversationEpoch === conversationEpochRef.current &&
+        userRef.current?.id === requestUserId;
+      const requestController = new AbortController();
+      activeChatRequestRef.current?.abort();
+      activeChatRequestRef.current = requestController;
       inFlightRef.current = true;
       const clientMessageId = retry?.clientMessageId || createId("message");
       const assistantId = retry?.assistantId || createId("assistant");
@@ -396,33 +856,39 @@ export default function Dashboard() {
         let retriedWithNewConversation = false;
         for (let attempt = 0; ; attempt += 1) {
           const retryDelays = [700, 1400, 2800, 5600, 10000, 15000];
+          if (!requestIsCurrent()) return;
           try {
             result = await createChatRun({
               content,
               conversationId: currentConversationId,
               clientMessageId,
+              signal: requestController.signal,
             });
+            if (!requestIsCurrent()) return;
             break;
-      } catch (error) {
-        if (
-          error instanceof ApiError &&
-          error.status === 503 &&
-          !error.code &&
-          attempt < 5
-        ) {
-          await sleep(retryDelays[attempt]);
-          continue;
-        }
-        if (
-          error instanceof ApiError &&
-          error.status === 404 &&
-          !retriedWithNewConversation
-        ) {
+          } catch (error) {
+            if (!requestIsCurrent()) return;
+            if (
+              error instanceof ApiError &&
+              error.status === 503 &&
+              !error.code &&
+              attempt < 5
+            ) {
+              await sleep(retryDelays[attempt]);
+              if (!requestIsCurrent()) return;
+              continue;
+            }
+            if (
+              error instanceof ApiError &&
+              error.status === 404 &&
+              !retriedWithNewConversation
+            ) {
               retriedWithNewConversation = true;
               currentConversationId = null;
               setConversationId(null);
-              window.localStorage.removeItem("jarvis-conversation-id");
+              clearConversationHint(window.localStorage, requestUserId);
               await sleep(0);
+              if (!requestIsCurrent()) return;
               continue;
             }
             if (
@@ -437,13 +903,20 @@ export default function Dashboard() {
                 error.status === 502)
             ) {
               await sleep(retryDelays[attempt]);
+              if (!requestIsCurrent()) return;
               continue;
             }
             throw error;
           }
         }
 
+        if (!requestIsCurrent()) return;
+        if (activeChatRequestRef.current === requestController) {
+          activeChatRequestRef.current = null;
+        }
+
         if (result.kind === "complete") {
+          if (!requestIsCurrent()) return;
           applyResponse(assistantId, result.response);
           return;
         }
@@ -462,8 +935,10 @@ export default function Dashboard() {
           statusUrl: result.statusUrl,
           signal: controller.signal,
         });
+        if (!requestIsCurrent()) return;
         applyResponse(assistantId, response);
       } catch (error) {
+        if (!requestIsCurrent()) return;
         if (error instanceof DOMException && error.name === "AbortError") return;
         setMessages((current) =>
           updateMessage(current, assistantId, {
@@ -471,14 +946,25 @@ export default function Dashboard() {
             state: "error",
           }),
         );
-        void getProviderStatus().then(setProvider).catch(() => {
-          setProvider((current) => ({ ...current, state: "ERROR" }));
-        });
+        void getProviderStatus()
+          .then((status) => {
+            if (requestIsCurrent()) setProvider(status);
+          })
+          .catch(() => {
+            if (requestIsCurrent()) {
+              setProvider((current) => ({ ...current, state: "ERROR" }));
+            }
+          });
       } finally {
-        inFlightRef.current = false;
+        if (activeChatRequestRef.current === requestController) {
+          activeChatRequestRef.current = null;
+        }
+        if (requestIsCurrent()) {
+          inFlightRef.current = false;
+        }
       }
     },
-    [applyResponse, conversationId, isChatBusy],
+    [applyResponse, chatHistoryLoading, conversationId, isChatBusy],
   );
 
   function submitChat(event: FormEvent) {
@@ -511,6 +997,14 @@ export default function Dashboard() {
       workItemTitle?: string;
     },
   ) {
+    const actionUserId = userRef.current?.id;
+    if (!actionUserId) return;
+    const actionEpoch = sessionEpochRef.current;
+    const actionConversationEpoch = conversationEpochRef.current;
+    const actionIsCurrent = () =>
+      actionEpoch === sessionEpochRef.current &&
+      actionConversationEpoch === conversationEpochRef.current &&
+      userRef.current?.id === actionUserId;
     const actionKey = [
       clarification.clarification_id,
       input.action,
@@ -525,36 +1019,90 @@ export default function Dashboard() {
         ...input,
         idempotencyKey: stableClarificationKey(actionKey),
       });
+      if (!actionIsCurrent()) return;
       setNewWorkClarification(null);
       setNewProjectName("");
       setNewWorkTitle("");
       applyResponse(messageId, response);
     } catch (error) {
-      setClarificationError(friendlyError(error));
+      if (actionIsCurrent()) setClarificationError(friendlyError(error));
     } finally {
-      setResolvingClarification(null);
+      if (actionIsCurrent()) setResolvingClarification(null);
+    }
+  }
+
+  async function resolveCalendar(
+    messageId: string,
+    proposal: CalendarProposal,
+    action: "APPROVE" | "REJECT",
+  ) {
+    const actionUserId = userRef.current?.id;
+    if (!actionUserId) return;
+    const actionEpoch = sessionEpochRef.current;
+    const actionConversationEpoch = conversationEpochRef.current;
+    const actionIsCurrent = () =>
+      actionEpoch === sessionEpochRef.current &&
+      actionConversationEpoch === conversationEpochRef.current &&
+      userRef.current?.id === actionUserId;
+    const actionKey = `calendar:${proposal.proposal_id}:${action}`;
+    setCalendarResolution(actionKey);
+    setCalendarError(null);
+    try {
+      const result = await resolveCalendarProposal({
+        proposalId: proposal.proposal_id,
+        action,
+        expectedVersion: proposal.version,
+        idempotencyKey: stableClarificationKey(actionKey),
+      });
+      if (!actionIsCurrent()) return;
+      setMessages((current) =>
+        updateMessage(current, messageId, {
+          content: result.display_response,
+          calendarProposal: null,
+        }),
+      );
+    } catch (error) {
+      if (actionIsCurrent()) setCalendarError(friendlyError(error));
+    } finally {
+      if (actionIsCurrent()) setCalendarResolution(null);
     }
   }
 
   async function openProject(project: ProjectListItem) {
+    const actionUserId = userRef.current?.id;
+    if (!actionUserId) return;
+    const actionEpoch = sessionEpochRef.current;
+    const actionIsCurrent = () =>
+      actionEpoch === sessionEpochRef.current &&
+      userRef.current?.id === actionUserId;
     setProjectLoading(true);
     try {
-      setSelectedProject(await getProject(project.id));
+      const detail = await getProject(project.id);
+      if (actionIsCurrent()) setSelectedProject(detail);
     } catch {
-      setDashboardError("프로젝트 상세를 불러오지 못했습니다.");
+      if (actionIsCurrent()) {
+        setDashboardError("프로젝트 상세를 불러오지 못했습니다.");
+      }
     } finally {
-      setProjectLoading(false);
+      if (actionIsCurrent()) setProjectLoading(false);
     }
   }
 
   async function openReport(report: ReportSnapshot) {
+    const actionUserId = userRef.current?.id;
+    if (!actionUserId) return;
+    const actionEpoch = sessionEpochRef.current;
+    const actionIsCurrent = () =>
+      actionEpoch === sessionEpochRef.current &&
+      userRef.current?.id === actionUserId;
     setReportLoading(true);
     try {
-      setSelectedReport(await getReport(report.report_id));
+      const detail = await getReport(report.report_id);
+      if (actionIsCurrent()) setSelectedReport(detail);
     } catch {
-      setDashboardError("보고서를 불러오지 못했습니다.");
+      if (actionIsCurrent()) setDashboardError("보고서를 불러오지 못했습니다.");
     } finally {
-      setReportLoading(false);
+      if (actionIsCurrent()) setReportLoading(false);
     }
   }
 
@@ -581,6 +1129,19 @@ export default function Dashboard() {
     return [provider.label, provider.model].filter(Boolean).join(" · ");
   }, [provider]);
 
+  if (authStatus === "loading") {
+    return (
+      <main className="session-loading" aria-live="polite">
+        <span className="brand-mark" aria-hidden="true">BY</span>
+        <p>나의 업무 공간을 준비하고 있어요…</p>
+      </main>
+    );
+  }
+
+  if (authStatus === "anonymous" || !user) {
+    return <AuthGate onAuthenticated={completeAuthentication} />;
+  }
+
   return (
     <main className="app-shell">
       <header className="topbar">
@@ -606,6 +1167,28 @@ export default function Dashboard() {
             <span aria-hidden="true" />
             {providerCopy}
           </div>
+          <div className="account-menu">
+            <span className="account-avatar" aria-hidden="true">
+              {(user.display_name || user.username).slice(0, 1).toUpperCase()}
+            </span>
+            <span className="account-name">
+              <strong>{user.display_name || user.username}</strong>
+              <small>@{user.username}</small>
+            </span>
+            <button
+              type="button"
+              onClick={() => setSecurityPanelOpen(true)}
+            >
+              보안
+            </button>
+            <button
+              type="button"
+              onClick={() => void signOut()}
+              disabled={logoutPending}
+            >
+              {logoutPending ? "로그아웃 중…" : "로그아웃"}
+            </button>
+          </div>
         </div>
       </header>
 
@@ -625,16 +1208,52 @@ export default function Dashboard() {
               <span className="eyebrow">BY CHAT</span>
               <h1>무엇을 정리해드릴까요?</h1>
             </div>
-            <span className="private-note">이 공간의 대화는 나만 볼 수 있어요</span>
+            <div className="chat-heading-tools">
+              <div className="conversation-controls">
+                <label>
+                  <span className="sr-only">대화 선택</span>
+                  <select
+                    value={conversationId || ""}
+                    onChange={(event) => switchConversation(event.target.value)}
+                    disabled={conversationListLoading || conversations.length === 0}
+                    aria-label="대화 선택"
+                  >
+                    {conversations.length === 0 && (
+                      <option value="">아직 대화가 없습니다</option>
+                    )}
+                    {conversations.map((conversation, index) => (
+                      <option key={conversation.id} value={conversation.id}>
+                        {conversationLabel(conversation, index)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button
+                  type="button"
+                  onClick={() => void startNewConversation()}
+                  disabled={creatingConversation}
+                >
+                  {creatingConversation ? "만드는 중…" : "＋ 새 대화"}
+                </button>
+              </div>
+              <span className="private-note">이 공간의 대화는 나만 볼 수 있어요</span>
+            </div>
           </div>
 
           <div className="message-list" aria-live="polite" aria-label="BY 대화">
-            {messages.map((message) => (
+            {chatHistoryLoading ? (
+              <div className="history-loading">
+                <span className="thinking-dot" aria-hidden="true" />
+                이전 대화를 불러오고 있어요…
+              </div>
+            ) : messages.map((message) => (
               <ChatBubble
                 key={message.id}
                 message={message}
                 busy={resolvingClarification}
                 clarificationError={clarificationError}
+                calendarBusy={calendarResolution}
+                calendarError={calendarError}
                 newWorkClarification={newWorkClarification}
                 newProjectName={newProjectName}
                 newWorkTitle={newWorkTitle}
@@ -646,6 +1265,9 @@ export default function Dashboard() {
                 onWorkTitle={setNewWorkTitle}
                 onResolve={(clarification, choice) =>
                   void resolveChoice(message.id, clarification, choice)
+                }
+                onResolveCalendar={(proposal, action) =>
+                  void resolveCalendar(message.id, proposal, action)
                 }
                 onRetry={() => {
                   if (message.retryContent && message.clientMessageId) {
@@ -665,7 +1287,7 @@ export default function Dashboard() {
               <button
                 type="button"
                 key={prompt}
-                disabled={isChatBusy}
+                disabled={isChatBusy || chatHistoryLoading}
                 onClick={() => void sendMessage(prompt)}
               >
                 {prompt}
@@ -680,6 +1302,7 @@ export default function Dashboard() {
             <textarea
               id="jarvis-input"
               value={input}
+              disabled={chatHistoryLoading}
               onChange={(event) => setInput(event.target.value)}
               onKeyDown={handleComposerKeyDown}
               placeholder="오늘 한 일이나 궁금한 업무를 편하게 말씀해주세요"
@@ -689,7 +1312,7 @@ export default function Dashboard() {
             <button
               className="send-button"
               type="submit"
-              disabled={!input.trim() || isChatBusy}
+              disabled={!input.trim() || isChatBusy || chatHistoryLoading}
               aria-label="BY에게 보내기"
             >
               <span>보내기</span>
@@ -953,6 +1576,27 @@ export default function Dashboard() {
         <span>BY</span>
         <p>Structured Memory를 기준으로 현재 업무를 보여드립니다.</p>
       </footer>
+      {securityPanelOpen && (
+        <AccountSecurityPanel
+          user={user}
+          onClose={() => setSecurityPanelOpen(false)}
+          onUserUpdated={(nextUser) => {
+            userRef.current = nextUser;
+            setUser(nextUser);
+          }}
+          onRecoveryCode={(code) => {
+            setSecurityPanelOpen(false);
+            setOneTimeRecoveryCode(code);
+          }}
+          onLogoutAll={leaveAuthenticatedSession}
+        />
+      )}
+      {oneTimeRecoveryCode && (
+        <RecoveryCodeDialog
+          code={oneTimeRecoveryCode}
+          onClose={() => setOneTimeRecoveryCode(null)}
+        />
+      )}
     </main>
   );
 }
@@ -961,6 +1605,8 @@ function ChatBubble({
   message,
   busy,
   clarificationError,
+  calendarBusy,
+  calendarError,
   newWorkClarification,
   newProjectName,
   newWorkTitle,
@@ -968,11 +1614,14 @@ function ChatBubble({
   onProjectName,
   onWorkTitle,
   onResolve,
+  onResolveCalendar,
   onRetry,
 }: {
   message: ChatMessage;
   busy: string | null;
   clarificationError: string | null;
+  calendarBusy: string | null;
+  calendarError: string | null;
   newWorkClarification: string | null;
   newProjectName: string;
   newWorkTitle: string;
@@ -987,6 +1636,10 @@ function ChatBubble({
       projectName?: string;
       workItemTitle?: string;
     },
+  ) => void;
+  onResolveCalendar: (
+    proposal: CalendarProposal,
+    action: "APPROVE" | "REJECT",
   ) => void;
   onRetry: () => void;
 }) {
@@ -1020,7 +1673,7 @@ function ChatBubble({
               />
             </audio>
           )}
-          {message.state === "error" && (
+          {message.state === "error" && message.retryContent && message.clientMessageId && (
             <button className="retry-button" type="button" onClick={onRetry}>
               같은 요청으로 다시 시도
             </button>
@@ -1099,11 +1752,57 @@ function ChatBubble({
               {clarificationError && <p className="inline-error" role="alert">{clarificationError}</p>}
             </div>
           )}
+          {message.calendarProposal && (
+            <div className="calendar-approval-box">
+              <span>Google Calendar</span>
+              <strong>{message.calendarProposal.title}</strong>
+              <small>{formatCalendarTime(message.calendarProposal.start_at)}</small>
+              <div>
+                <button
+                  type="button"
+                  disabled={Boolean(calendarBusy)}
+                  onClick={() =>
+                    onResolveCalendar(message.calendarProposal!, "APPROVE")
+                  }
+                >
+                  {calendarBusy ===
+                  `calendar:${message.calendarProposal.proposal_id}:APPROVE`
+                    ? "등록 중…"
+                    : "일정 등록"}
+                </button>
+                <button
+                  type="button"
+                  className="calendar-reject-button"
+                  disabled={Boolean(calendarBusy)}
+                  onClick={() =>
+                    onResolveCalendar(message.calendarProposal!, "REJECT")
+                  }
+                >
+                  취소
+                </button>
+              </div>
+              {calendarError && (
+                <p className="inline-error" role="alert">{calendarError}</p>
+              )}
+            </div>
+          )}
           {message.report && <ReportDocument report={message.report} compact />}
         </div>
       </div>
     </article>
   );
+}
+
+function formatCalendarTime(value: string): string {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return new Intl.DateTimeFormat("ko-KR", {
+    month: "long",
+    day: "numeric",
+    weekday: "short",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(parsed);
 }
 
 function StatusCount({ label, count, tone }: { label: string; count: number; tone: string }) {
