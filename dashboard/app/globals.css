@@ -568,6 +568,48 @@ a {
   border-style: dashed !important;
 }
 
+.calendar-approval-box {
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid #d9dcd6;
+  border-radius: 12px;
+  display: grid;
+  gap: 4px;
+  margin-top: 13px;
+  padding: 12px;
+}
+
+.calendar-approval-box > span,
+.calendar-approval-box > small {
+  color: var(--ink-soft);
+  font-size: 10px;
+}
+
+.calendar-approval-box > strong {
+  font-size: 13px;
+}
+
+.calendar-approval-box > div {
+  display: flex;
+  gap: 7px;
+  margin-top: 7px;
+}
+
+.calendar-approval-box button {
+  background: var(--forest);
+  border: 1px solid var(--forest);
+  border-radius: 9px;
+  color: white;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 7px 10px;
+}
+
+.calendar-approval-box .calendar-reject-button {
+  background: white;
+  border-color: var(--line-strong);
+  color: var(--ink-soft);
+}
+
 .new-work-button > span {
   color: var(--forest) !important;
   font-size: 17px;

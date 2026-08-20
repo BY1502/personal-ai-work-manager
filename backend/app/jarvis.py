@@ -5,6 +5,7 @@ import time
 from datetime import timedelta
 
 from app.context_linking import MemoryManager
+from app.calendar_agent import CalendarManager, is_calendar_request
 from app.event_engine import DomainEvent, EventEngine
 from app.extraction import ExtractionProvider
 from app.models import (
@@ -53,6 +54,7 @@ class JarvisOrchestrator:
         reports: ReportManager,
         extractor: ExtractionProvider,
         skill_runtime: SkillRuntime | None = None,
+        calendar_manager: CalendarManager | None = None,
         tts: LocalTTSBridge | None = None,
         event_engine: EventEngine | None = None,
         validator: ExtractionValidator,
@@ -68,6 +70,7 @@ class JarvisOrchestrator:
         self.reports = reports
         self.extractor = extractor
         self.skill_runtime = skill_runtime
+        self.calendar_manager = calendar_manager
         self.tts = tts
         self.event_engine = event_engine
         self.validator = validator
@@ -146,6 +149,62 @@ class JarvisOrchestrator:
             prompt_version = intake.stored_prompt_version or getattr(
                 self.extractor, "prompt_version", "unknown"
             )
+            if (
+                self.calendar_manager is not None
+                and self.skill_runtime is not None
+                and is_calendar_request(request.content)
+            ):
+                failure_stage = "CALENDAR_INTERPRETATION"
+                self.repository.begin_interpretation(
+                    user_id=self.user_id,
+                    run_id=intake.run_id,
+                    provider_name=provider_name,
+                    model_version=model_version,
+                    prompt_version=prompt_version,
+                )
+                provider_started_at = time.monotonic()
+                skill_result = self.skill_runtime.invoke(
+                    user_id=self.user_id,
+                    run_id=intake.run_id,
+                    conversation_id=intake.conversation_id,
+                    skill_name="calendar-agent",
+                    input_payload={"content": request.content},
+                    step_key="calendar-agent",
+                    allow_retry=intake.retry_skill,
+                )
+                provider_duration_ms = skill_result.duration_ms
+                self.repository.complete_interpretation(
+                    user_id=self.user_id,
+                    run_id=intake.run_id,
+                    duration_ms=provider_duration_ms,
+                )
+                failure_stage = "CALENDAR_POLICY"
+                calendar_result = self.calendar_manager.handle_draft(
+                    user_id=self.user_id,
+                    run_id=intake.run_id,
+                    output=skill_result.output,
+                    list_tool=lambda payload: self.skill_runtime.execute_tool(
+                        user_id=self.user_id,
+                        run_id=intake.run_id,
+                        skill_name="calendar-agent",
+                        tool_name="calendar.events.list",
+                        payload=payload,
+                    ),
+                )
+                response = JarvisResponse(
+                    run_id=intake.run_id,
+                    conversation_id=intake.conversation_id,
+                    status="COMPLETED",
+                    display_response=calendar_result.display_response,
+                    voice_response=calendar_result.voice_response,
+                    data=calendar_result.data,
+                )
+                failure_stage = "RESPONSE_PERSISTENCE"
+                return self._persist_response(
+                    run_id=intake.run_id,
+                    response=response,
+                    memory_status=calendar_result.memory_status,
+                )
             if intake.stored_plan is None:
                 failure_stage = "INTERPRETATION"
                 self.repository.begin_interpretation(

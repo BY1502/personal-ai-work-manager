@@ -93,6 +93,56 @@ class _LLMExtractionProvider:
     def extract(self, content: str) -> ExtractionEnvelope:
         return self.extract_with_context(content, None)
 
+    def execute_skill(
+        self,
+        *,
+        skill_name: str,
+        model_profile: str,
+        input_payload: dict,
+        context: dict,
+        output_schema: dict,
+    ) -> dict:
+        """Execute a generic read/proposal Skill with the configured model.
+
+        The model only returns a draft matching the Skill schema. It receives
+        no database or external-write handle; deterministic application code
+        remains responsible for validation, approval and side effects.
+        """
+
+        instructions = str(context.get("skill", {}).get("instructions", "")).strip()
+        system_prompt = (
+            "당신은 BY의 제한된 Skill Worker입니다. 아래 SKILL.md 지침만 수행하세요. "
+            "DB나 외부 서비스를 직접 변경하지 말고, 요청된 JSON Schema 객체 하나만 "
+            "반환하세요. 설명, Markdown, Chain-of-Thought를 출력하지 마세요.\n\n"
+            f"Skill: {skill_name}\nModel profile label: {model_profile}\n"
+            f"SKILL.md:\n{instructions}\n\nJSON Schema:\n"
+            + json.dumps(output_schema, ensure_ascii=False, separators=(",", ":"))
+        )
+        user_prompt = json.dumps(
+            {
+                "input": input_payload,
+                "context_package": context.get("context_package", {}),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        raw = self.transport.complete_json(
+            schema_name=skill_name.replace("-", "_") + "_output",
+            schema=output_schema,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+        )
+        if not isinstance(raw, str) or not raw.strip():
+            raise ExtractionTransportError("provider returned empty Skill output")
+        if len(raw.encode("utf-8")) > MAX_MODEL_OUTPUT_BYTES:
+            raise ExtractionTransportError("Skill output exceeded safe limit")
+        try:
+            return _strict_json_object(raw)
+        except ValueError:
+            raise ExtractionInvalidJsonError(
+                "provider returned invalid Skill JSON"
+            ) from None
+
     def extract_with_context(
         self,
         content: str,
@@ -193,23 +243,24 @@ class ConcurrencyLimitedExtractionProvider(ExtractionProvider):
     ) -> ExtractionEnvelope:
         return self._extract(content, context)
 
+    def execute_skill(self, **kwargs) -> dict:
+        self._acquire()
+        try:
+            method = getattr(self._delegate, "execute_skill", None)
+            if not callable(method):
+                raise ExtractionProviderError(
+                    "configured provider does not support generic Skills"
+                )
+            return method(**kwargs)
+        finally:
+            self._semaphore.release()
+
     def _extract(
         self,
         content: str,
         context: dict | None,
     ) -> ExtractionEnvelope:
-        if self._acquire_timeout_seconds <= 0:
-            if not self._semaphore.acquire(blocking=False):
-                raise ExtractionConcurrencyError(
-                    "provider extraction is at capacity, please retry shortly"
-                )
-        elif not self._semaphore.acquire(
-            blocking=True,
-            timeout=self._acquire_timeout_seconds,
-        ):
-            raise ExtractionConcurrencyError(
-                "provider extraction is at capacity, please retry shortly"
-            )
+        self._acquire()
         try:
             method = getattr(self._delegate, "extract_with_context", None)
             if callable(method):
@@ -217,6 +268,19 @@ class ConcurrencyLimitedExtractionProvider(ExtractionProvider):
             return self._delegate.extract(content)
         finally:
             self._semaphore.release()
+
+    def _acquire(self) -> None:
+        if self._acquire_timeout_seconds <= 0:
+            acquired = self._semaphore.acquire(blocking=False)
+        else:
+            acquired = self._semaphore.acquire(
+                blocking=True,
+                timeout=self._acquire_timeout_seconds,
+            )
+        if not acquired:
+            raise ExtractionConcurrencyError(
+                "provider extraction is at capacity, please retry shortly"
+            )
 
 
 class LocalLLMProvider(_LLMExtractionProvider):

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "calendar-request.v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["content", "context_package"],
+  "properties": {
+    "content": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 10000
+    },
+    "context_package": {
+      "type": "object"
+    }
+  }
+}

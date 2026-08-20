@@ -29,6 +29,8 @@ class ContextPackageBuilder:
         conversation_id: str,
         content: str,
         recent_days: int = 30,
+        allowed_tools: list[str] | None = None,
+        allowed_actions: list[str] | None = None,
     ) -> ContextPackage:
         today = local_date(self.database.clock, self.database.timezone_name)
         current = self.work_queries.list_by_status(
@@ -57,8 +59,8 @@ class ContextPackageBuilder:
                 "timezone": self.database.timezone_name,
                 "do_not_write": True,
             },
-            "allowed_actions": ["RETURN_WORK_FACT_DRAFT"],
-            "allowed_tools": ["project.search", "work.search", "memory.get_recent"],
+            "allowed_actions": allowed_actions or ["RETURN_WORK_FACT_DRAFT"],
+            "allowed_tools": allowed_tools or [],
         }
         return ContextPackage(payload=payload, digest=sha256_text(_stable_json(payload)))
 

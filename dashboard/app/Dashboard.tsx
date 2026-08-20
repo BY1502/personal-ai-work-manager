@@ -21,10 +21,12 @@ import {
   getRun,
   getSummary,
   resolveClarification,
+  resolveCalendarProposal,
 } from "@/lib/api";
 import { pollRun } from "@/lib/polling";
 import type {
   ActivityItem,
+  CalendarProposal,
   ChatMessage,
   Clarification,
   DashboardSummary,
@@ -103,6 +105,15 @@ function sleep(ms: number): Promise<void> {
 
 function friendlyError(error: unknown): string {
   if (error instanceof ApiError) {
+    if (error.code === "GOOGLE_CALENDAR_NOT_CONFIGURED") {
+      return "Google Calendar 연결이 필요합니다. 로컬 설정을 확인해주세요.";
+    }
+    if (error.code === "CALENDAR_EXECUTION_UNCERTAIN") {
+      return "등록 결과가 불확실해 중복 생성을 막았습니다. Google Calendar를 확인해주세요.";
+    }
+    if (error.code === "GOOGLE_CALENDAR_FAILED") {
+      return "Google Calendar 연결이 원활하지 않습니다. 잠시 후 다시 시도해주세요.";
+    }
     if (
       error.code === "EXTRACTION_TIMEOUT" ||
       error.code === "REQUEST_TIMEOUT" ||
@@ -210,6 +221,10 @@ export default function Dashboard() {
   const [clarificationError, setClarificationError] = useState<string | null>(
     null,
   );
+  const [calendarResolution, setCalendarResolution] = useState<string | null>(
+    null,
+  );
+  const [calendarError, setCalendarError] = useState<string | null>(null);
   const [newWorkClarification, setNewWorkClarification] = useState<
     string | null
   >(null);
@@ -323,6 +338,15 @@ export default function Dashboard() {
         response.conversation_id,
       );
       const report = response.data?.report || null;
+      const calendarData = response.data?.calendar;
+      const calendarProposal =
+        calendarData &&
+        typeof calendarData === "object" &&
+        "proposal" in calendarData &&
+        calendarData.proposal &&
+        typeof calendarData.proposal === "object"
+          ? (calendarData.proposal as CalendarProposal)
+          : null;
       setMessages((current) =>
         updateMessage(current, assistantId, {
           state: "complete",
@@ -330,6 +354,7 @@ export default function Dashboard() {
             ? `${REPORT_LABEL[report.report_type] || "업무보고"}를 정리했습니다.`
             : response.display_response,
           clarification: response.clarification || null,
+          calendarProposal,
           report,
           audioUrl: response.audio_url || null,
         }),
@@ -536,6 +561,34 @@ export default function Dashboard() {
     }
   }
 
+  async function resolveCalendar(
+    messageId: string,
+    proposal: CalendarProposal,
+    action: "APPROVE" | "REJECT",
+  ) {
+    const actionKey = `calendar:${proposal.proposal_id}:${action}`;
+    setCalendarResolution(actionKey);
+    setCalendarError(null);
+    try {
+      const result = await resolveCalendarProposal({
+        proposalId: proposal.proposal_id,
+        action,
+        expectedVersion: proposal.version,
+        idempotencyKey: stableClarificationKey(actionKey),
+      });
+      setMessages((current) =>
+        updateMessage(current, messageId, {
+          content: result.display_response,
+          calendarProposal: null,
+        }),
+      );
+    } catch (error) {
+      setCalendarError(friendlyError(error));
+    } finally {
+      setCalendarResolution(null);
+    }
+  }
+
   async function openProject(project: ProjectListItem) {
     setProjectLoading(true);
     try {
@@ -635,6 +688,8 @@ export default function Dashboard() {
                 message={message}
                 busy={resolvingClarification}
                 clarificationError={clarificationError}
+                calendarBusy={calendarResolution}
+                calendarError={calendarError}
                 newWorkClarification={newWorkClarification}
                 newProjectName={newProjectName}
                 newWorkTitle={newWorkTitle}
@@ -646,6 +701,9 @@ export default function Dashboard() {
                 onWorkTitle={setNewWorkTitle}
                 onResolve={(clarification, choice) =>
                   void resolveChoice(message.id, clarification, choice)
+                }
+                onResolveCalendar={(proposal, action) =>
+                  void resolveCalendar(message.id, proposal, action)
                 }
                 onRetry={() => {
                   if (message.retryContent && message.clientMessageId) {
@@ -961,6 +1019,8 @@ function ChatBubble({
   message,
   busy,
   clarificationError,
+  calendarBusy,
+  calendarError,
   newWorkClarification,
   newProjectName,
   newWorkTitle,
@@ -968,11 +1028,14 @@ function ChatBubble({
   onProjectName,
   onWorkTitle,
   onResolve,
+  onResolveCalendar,
   onRetry,
 }: {
   message: ChatMessage;
   busy: string | null;
   clarificationError: string | null;
+  calendarBusy: string | null;
+  calendarError: string | null;
   newWorkClarification: string | null;
   newProjectName: string;
   newWorkTitle: string;
@@ -987,6 +1050,10 @@ function ChatBubble({
       projectName?: string;
       workItemTitle?: string;
     },
+  ) => void;
+  onResolveCalendar: (
+    proposal: CalendarProposal,
+    action: "APPROVE" | "REJECT",
   ) => void;
   onRetry: () => void;
 }) {
@@ -1099,11 +1166,57 @@ function ChatBubble({
               {clarificationError && <p className="inline-error" role="alert">{clarificationError}</p>}
             </div>
           )}
+          {message.calendarProposal && (
+            <div className="calendar-approval-box">
+              <span>Google Calendar</span>
+              <strong>{message.calendarProposal.title}</strong>
+              <small>{formatCalendarTime(message.calendarProposal.start_at)}</small>
+              <div>
+                <button
+                  type="button"
+                  disabled={Boolean(calendarBusy)}
+                  onClick={() =>
+                    onResolveCalendar(message.calendarProposal!, "APPROVE")
+                  }
+                >
+                  {calendarBusy ===
+                  `calendar:${message.calendarProposal.proposal_id}:APPROVE`
+                    ? "등록 중…"
+                    : "일정 등록"}
+                </button>
+                <button
+                  type="button"
+                  className="calendar-reject-button"
+                  disabled={Boolean(calendarBusy)}
+                  onClick={() =>
+                    onResolveCalendar(message.calendarProposal!, "REJECT")
+                  }
+                >
+                  취소
+                </button>
+              </div>
+              {calendarError && (
+                <p className="inline-error" role="alert">{calendarError}</p>
+              )}
+            </div>
+          )}
           {message.report && <ReportDocument report={message.report} compact />}
         </div>
       </div>
     </article>
   );
+}
+
+function formatCalendarTime(value: string): string {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return new Intl.DateTimeFormat("ko-KR", {
+    month: "long",
+    day: "numeric",
+    weekday: "short",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(parsed);
 }
 
 function StatusCount({ label, count, tone }: { label: string; count: number; tone: string }) {

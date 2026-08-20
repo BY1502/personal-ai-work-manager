@@ -78,6 +78,24 @@ export interface Clarification {
   candidates: ClarificationCandidate[];
 }
 
+export interface CalendarProposal {
+  proposal_id: string;
+  action: "CREATE";
+  status: string;
+  version: number;
+  title: string;
+  start_at: string;
+  end_at: string;
+  timezone: string;
+  requires_approval: boolean;
+}
+
+export interface CalendarResolutionResponse {
+  status: string;
+  display_response: string;
+  proposal: CalendarProposal;
+}
+
 export interface ReportSectionItem {
   text: string;
 }
@@ -124,6 +142,7 @@ export interface ChatMessage {
   retryContent?: string;
   clientMessageId?: string;
   clarification?: Clarification | null;
+  calendarProposal?: CalendarProposal | null;
   report?: ReportSnapshot | null;
   audioUrl?: string | null;
 }

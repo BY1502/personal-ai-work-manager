@@ -9,6 +9,17 @@ from fastapi import Body, FastAPI, Header, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.context_linking import MemoryManager
+from app.calendar_agent import (
+    CalendarConfigurationError,
+    CalendarDraftValidationError,
+    CalendarExecutionUncertain,
+    CalendarGateway,
+    CalendarManager,
+    CalendarOperationInProgress,
+    CalendarProviderError,
+    CalendarResolutionRequest,
+    build_calendar_gateway,
+)
 from app.event_engine import DomainEvent, EventEngine
 from app.context_package import ContextPackageBuilder
 from app.database import Database
@@ -59,6 +70,7 @@ def create_app(
     clock: Clock | None = None,
     extractor: ExtractionProvider | None = None,
     tts: LocalTTSBridge | None = None,
+    calendar_gateway: CalendarGateway | None = None,
 ) -> FastAPI:
     resolved_database_path = database_path or Path(
         os.getenv("PERSONAL_AI_DB_PATH", "data/personal_ai.db")
@@ -75,7 +87,16 @@ def create_app(
     work_manager = WorkManager(database)
     work_queries = StructuredWorkQueryService(database)
     resolved_extractor = extractor or build_extraction_provider()
-    tool_registry = build_default_tool_registry(database=database)
+    resolved_calendar_gateway = calendar_gateway or build_calendar_gateway()
+    calendar_manager = CalendarManager(
+        database=database,
+        repository=repository,
+        gateway=resolved_calendar_gateway,
+    )
+    tool_registry = build_default_tool_registry(
+        database=database,
+        calendar_gateway=resolved_calendar_gateway,
+    )
     skills_root = Path(
         os.getenv(
             "SKILLS_ROOT",
@@ -87,7 +108,9 @@ def create_app(
     ).strip().lower() not in {"0", "false", "no", "off"}
     auto_enable_names = {
         name.strip()
-        for name in os.getenv("SKILL_AUTO_ENABLE", "work-capture").split(",")
+        for name in os.getenv(
+            "SKILL_AUTO_ENABLE", "work-capture,calendar-agent"
+        ).split(",")
         if name.strip()
     }
     skill_registry = SkillRegistry(
@@ -151,6 +174,7 @@ def create_app(
         reports=reports,
         extractor=resolved_extractor,
         skill_runtime=skill_runtime,
+        calendar_manager=calendar_manager,
         tts=resolved_tts,
         event_engine=event_engine,
         validator=ExtractionValidator(),
@@ -183,6 +207,8 @@ def create_app(
     application.state.tool_registry = tool_registry
     application.state.skill_registry = skill_registry
     application.state.skill_runtime = skill_runtime
+    application.state.calendar_manager = calendar_manager
+    application.state.calendar_gateway = resolved_calendar_gateway
     application.state.tts = resolved_tts
     application.state.event_engine = event_engine
     allowed_origins = [
@@ -220,6 +246,42 @@ def create_app(
     @application.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @application.get("/api/v1/calendar/status")
+    def calendar_status() -> dict:
+        return calendar_manager.status()
+
+    @application.get("/api/v1/calendar/proposals/{proposal_id}")
+    def get_calendar_proposal(proposal_id: str):
+        return calendar_manager.get_proposal(
+            user_id=database.default_user_id,
+            proposal_id=proposal_id,
+        )
+
+    @application.post("/api/v1/calendar/proposals/{proposal_id}/resolve")
+    def resolve_calendar_proposal(
+        proposal_id: str,
+        request: CalendarResolutionRequest,
+        idempotency_key: str = Header(
+            alias="Idempotency-Key", min_length=8, max_length=200
+        ),
+    ) -> dict:
+        proposal = calendar_manager.resolve(
+            user_id=database.default_user_id,
+            proposal_id=proposal_id,
+            request=request,
+            idempotency_key=idempotency_key,
+        )
+        action_copy = (
+            "Google Calendar에 등록했습니다."
+            if proposal.status == "COMPLETED"
+            else "일정 등록을 취소했습니다."
+        )
+        return {
+            "status": proposal.status,
+            "display_response": action_copy,
+            "proposal": proposal.model_dump(mode="json"),
+        }
 
     @application.post("/api/v1/chat/runs", response_model=JarvisResponse)
     def run_chat(request: object = Body(default=None)) -> JarvisResponse:
@@ -586,6 +648,26 @@ def create_app(
     @application.exception_handler(SkillRegistryError)
     async def skill_registry_error(_, exc: SkillRegistryError):
         return _problem(503, "SKILL_RUNTIME_FAILED", str(exc))
+
+    @application.exception_handler(CalendarConfigurationError)
+    async def calendar_configuration_error(_, exc: CalendarConfigurationError):
+        return _problem(503, "GOOGLE_CALENDAR_NOT_CONFIGURED", str(exc))
+
+    @application.exception_handler(CalendarDraftValidationError)
+    async def calendar_draft_validation_error(_, exc: CalendarDraftValidationError):
+        return _problem(422, "CALENDAR_DRAFT_INVALID", str(exc))
+
+    @application.exception_handler(CalendarOperationInProgress)
+    async def calendar_operation_in_progress(_, exc: CalendarOperationInProgress):
+        return _problem(409, "CALENDAR_OPERATION_IN_PROGRESS", str(exc))
+
+    @application.exception_handler(CalendarExecutionUncertain)
+    async def calendar_execution_uncertain(_, exc: CalendarExecutionUncertain):
+        return _problem(409, "CALENDAR_EXECUTION_UNCERTAIN", str(exc))
+
+    @application.exception_handler(CalendarProviderError)
+    async def calendar_provider_error(_, exc: CalendarProviderError):
+        return _problem(503, "GOOGLE_CALENDAR_FAILED", str(exc))
 
     @application.exception_handler(sqlite3.OperationalError)
     async def sqlite_operational_error(_, exc: sqlite3.OperationalError):

@@ -7,6 +7,12 @@
 Desktop UI 확장에 앞서 Phase 2의 첫 실행 경계로 Trigger/Event Engine,
 Permission Engine, 범용 단일 Skill 실행을 추가했습니다.
 
+두 번째 Skill인 `calendar-agent`는 한국어 일정 조회와 일정 생성 제안을 처리합니다.
+`calendar.events.list`만 Worker용 읽기 Tool로 등록하며, Calendar Write Tool은 제공하지
+않습니다. 생성 제안은 별도 `calendar_action_proposals` 승인 Ledger에 저장되고 사용자가
+승인한 뒤에만 Google Calendar Gateway가 실행합니다. OAuth 비밀정보는 환경변수로만
+주입합니다.
+
 ## Phase 2 첫 Vertical Slice
 
 `skills/*/SKILL.md`를 Skill Registry가 발견하고 YAML/Schema/Tool/Permission을
@@ -17,7 +23,7 @@ Chat에 연결되어 있으며, 범용 Skill은 내부 `SkillRuntime.invoke()`�
 변경합니다.
 
 읽기 전용 Tool Registry에는 `project.search`, `work.search`,
-`memory.get_recent`만 등록되어 있습니다. `PermissionEngine`은 Skill manifest와
+`memory.get_recent`, `calendar.events.list`가 등록되어 있습니다. `PermissionEngine`은 Skill manifest와
 runtime Tool permission의 교집합을 평가하며 DENY, JARVIS_ONLY, manifest 외 Tool은
 실행하지 않습니다.
 
@@ -210,7 +216,7 @@ TTS는 Backend 외부의 HTTP 서비스이며 기본 Docker 구성은 별도 Pip
 Canonical Memory를 유지합니다. 모델 파일은 named volume으로 다운로드되며 GitHub에
 포함되지 않습니다.
 
-현재 전체 Backend Suite는 36개 테스트입니다.
+현재 전체 Backend Suite는 42개 테스트입니다.
 
 ## 주요 문서
 
@@ -219,3 +225,4 @@ Canonical Memory를 유지합니다. 모델 파일은 named volume으로 다운�
 - [SQLite Backup / Restore Runbook](./SQLITE_BACKUP_RESTORE.md)
 - [Phase 1 Validation Summary](./VALIDATION_METRICS.md)
 - [Environment example](./.env.example)
+- [Google Calendar 연결](../docs/GOOGLE_CALENDAR.md)

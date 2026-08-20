@@ -58,6 +58,21 @@ iteration/timeout, 실행 ledger.
 읽을 파일: `backend/skills/work-capture/SKILL.md`,
 `backend/app/skills/registry.py`, `backend/app/skill_runtime.py`.
 
+### 실습: Calendar의 읽기와 쓰기를 분리하기
+
+`calendar-agent`를 따라가면 LLM Agent에 외부 서비스 권한을 직접 주지 않는 패턴을
+볼 수 있습니다.
+
+1. `backend/skills/calendar-agent/SKILL.md`가 역할과 출력 계약을 정의합니다.
+2. `calendar.events.list`는 Permission Engine을 통과하는 읽기 Tool입니다.
+3. CREATE 출력은 Google API 호출이 아니라 `PENDING_APPROVAL` 제안이 됩니다.
+4. 사용자가 승인하면 deterministic code가 버전과 중복 실행을 확인합니다.
+5. Google 측 Event ID도 결정적으로 고정해 네트워크 결과가 모호할 때 두 번째 Write를
+   금지합니다.
+
+핵심은 “LLM이 계획하고, 일반 코드가 검증하고, 사용자가 외부 변경을 승인한다”는
+세 경계를 분리하는 것입니다.
+
 ## 5. Trigger/Event Engine
 
 배울 개념: Domain Event, idempotency digest, 상태 기반 Trigger, suggestion과

@@ -38,9 +38,14 @@ curl 'http://127.0.0.1:8100/api/v1/suggestions?limit=3'
 curl 'http://127.0.0.1:8100/api/v1/skills'
 ```
 
-현재는 `work-capture`와 단일 순차 Skill 실행만 연결되어 있고 Worker가
-Structured Memory를 직접 쓰지 않습니다. Multi-Skill Planner, 병렬 실행, 자동
-외부 액션, Desktop UI는 아직 범위에 포함하지 않습니다.
+현재는 `work-capture`와 `calendar-agent`가 단일 순차 Skill Runtime을 사용하며,
+Worker가 Structured Memory나 Google Calendar를 직접 쓰지 않습니다. Calendar 조회는
+읽기 Tool로 제한되고, 일정 생성은 사용자가 확인한 제안만 JARVIS 전용 Gateway가
+실행합니다. Multi-Skill Planner, 병렬 실행, 무승인 외부 액션은 아직 범위에
+포함하지 않습니다.
+
+Google OAuth 로컬 연결 방법과 승인 안전 경계는
+[Google Calendar 연결 안내](docs/GOOGLE_CALENDAR.md)를 참고하세요.
 
 ## LLM Provider 선택
 
@@ -109,14 +114,14 @@ DASHBOARD_BIND=127.0.0.1
 연결이 계속 끊기는 경우 아래를 순차 실행하세요.
 
 ```bash
-cd 'personal-ai-work-manager'
+cd personal-ai-work-manager
 ./scripts/check_jarvis_connectivity.sh
 ```
 
 대시보드 주소(:3100)로 직접 점검할 때는 아래처럼 사용하세요.
 
 ```bash
-cd 'personal-ai-work-manager'
+cd personal-ai-work-manager
 API_BASE_URL=http://127.0.0.1:3100 BACKEND_BASE_URL=http://127.0.0.1:8100 ./scripts/verify_chat_connectivity.sh 20 120
 ```
 

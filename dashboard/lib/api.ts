@@ -8,6 +8,7 @@ import {
 } from "./normalize";
 import type {
   ActivityItem,
+  CalendarResolutionResponse,
   DashboardSummary,
   JarvisResponse,
   PageResult,
@@ -412,4 +413,23 @@ export async function resolveClarification(input: {
       }),
     },
   )) as JarvisResponse;
+}
+
+export async function resolveCalendarProposal(input: {
+  proposalId: string;
+  action: "APPROVE" | "REJECT";
+  expectedVersion: number;
+  idempotencyKey: string;
+}): Promise<CalendarResolutionResponse> {
+  return (await request(
+    `/api/v1/calendar/proposals/${encodeURIComponent(input.proposalId)}/resolve`,
+    {
+      method: "POST",
+      headers: { "Idempotency-Key": input.idempotencyKey },
+      body: JSON.stringify({
+        action: input.action,
+        expected_version: input.expectedVersion,
+      }),
+    },
+  )) as CalendarResolutionResponse;
 }
