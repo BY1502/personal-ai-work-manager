@@ -110,13 +110,75 @@ def _verify_unlocked(path: Path) -> DatabaseVerification:
                     "not a JARVIS Structured Memory database; missing tables: "
                     + ", ".join(missing)
                 )
-
             migrations = tuple(
                 str(row[0])
                 for row in connection.execute(
                     "SELECT version FROM schema_migrations ORDER BY version"
                 ).fetchall()
             )
+            if "008" in migrations and "auth_sessions" not in tables:
+                raise SQLiteMaintenanceError(
+                    "not a JARVIS Structured Memory database; missing tables: "
+                    "auth_sessions"
+                )
+            if "009" in migrations and "login_rate_limits" not in tables:
+                raise SQLiteMaintenanceError(
+                    "not a JARVIS Structured Memory database; missing tables: "
+                    "login_rate_limits"
+                )
+            if "008" in migrations:
+                _require_columns(
+                    connection,
+                    table="users",
+                    required={
+                        "username",
+                        "normalized_username",
+                        "display_name",
+                        "password_credential",
+                        "is_owner",
+                    },
+                )
+                _require_columns(
+                    connection,
+                    table="auth_sessions",
+                    required={
+                        "id",
+                        "user_id",
+                        "token_hash",
+                        "expires_at",
+                        "revoked_at",
+                    },
+                )
+            if "009" in migrations:
+                _require_columns(
+                    connection,
+                    table="users",
+                    required={
+                        "recovery_code_hash",
+                        "recovery_code_created_at",
+                    },
+                )
+                _require_columns(
+                    connection,
+                    table="conversations",
+                    required={
+                        "title",
+                        "creation_key_hash",
+                        "creation_request_hash",
+                    },
+                )
+                _require_columns(
+                    connection,
+                    table="login_rate_limits",
+                    required={
+                        "identifier_hash",
+                        "failure_count",
+                        "window_started_at",
+                        "locked_until",
+                        "updated_at",
+                    },
+                )
+
             page_count = int(
                 connection.execute("PRAGMA page_count").fetchone()[0]
             )
@@ -135,6 +197,24 @@ def _verify_unlocked(path: Path) -> DatabaseVerification:
         page_count=page_count,
         migrations=migrations,
     )
+
+
+def _require_columns(
+    connection: sqlite3.Connection,
+    *,
+    table: str,
+    required: set[str],
+) -> None:
+    present = {
+        str(row[1])
+        for row in connection.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+    missing = sorted(required - present)
+    if missing:
+        raise SQLiteMaintenanceError(
+            f"not a JARVIS Structured Memory database; {table} is missing "
+            "columns: " + ", ".join(missing)
+        )
 
 
 def verify_database(database_path: Path) -> DatabaseVerification:
@@ -174,6 +254,58 @@ def _copy_database(source_path: Path, destination_path: Path) -> None:
     finally:
         destination.close()
         source.close()
+
+
+def _invalidate_restored_sessions(path: Path) -> None:
+    """A restore must not resurrect copied sessions or consumed recovery codes."""
+
+    connection = sqlite3.connect(path, timeout=5, isolation_level=None)
+    try:
+        has_sessions = connection.execute(
+            """
+            SELECT 1 FROM sqlite_master
+            WHERE type = 'table' AND name = 'auth_sessions'
+            """
+        ).fetchone()
+        user_columns = {
+            str(row[1])
+            for row in connection.execute("PRAGMA table_info(users)").fetchall()
+        }
+        has_recovery = "recovery_code_hash" in user_columns
+        has_rate_limits = connection.execute(
+            """
+            SELECT 1 FROM sqlite_master
+            WHERE type = 'table' AND name = 'login_rate_limits'
+            """
+        ).fetchone()
+        if has_sessions is None and not has_recovery and has_rate_limits is None:
+            return
+        revoked_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        connection.execute("BEGIN IMMEDIATE")
+        if has_sessions is not None:
+            connection.execute(
+                "UPDATE auth_sessions SET revoked_at = ? WHERE revoked_at IS NULL",
+                (revoked_at,),
+            )
+        if has_recovery:
+            connection.execute(
+                """
+                UPDATE users
+                SET recovery_code_hash = NULL,
+                    recovery_code_created_at = NULL
+                WHERE recovery_code_hash IS NOT NULL
+                """
+            )
+        if has_rate_limits is not None:
+            connection.execute("DELETE FROM login_rate_limits")
+        connection.commit()
+    except sqlite3.Error as exc:
+        connection.rollback()
+        raise SQLiteMaintenanceError(
+            f"could not invalidate restored authentication sessions: {exc}"
+        ) from exc
+    finally:
+        connection.close()
 
 
 def _fsync_file(path: Path) -> None:
@@ -364,6 +496,7 @@ def restore_database(
             safety_result: BackupResult | None = None
             try:
                 _copy_database(backup_path, staged_path)
+                _invalidate_restored_sessions(staged_path)
                 staged_verification = _verify_unlocked(staged_path)
                 os.chmod(staged_path, 0o600)
                 _fsync_file(staged_path)

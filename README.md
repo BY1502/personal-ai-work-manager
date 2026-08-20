@@ -11,6 +11,24 @@ ollama pull qwen3.5:35b-a3b-q4_K_M
 docker compose up -d --build
 ~~~
 
+처음 Dashboard를 열면 `계정 만들기`에서 아이디와 10자 이상의 비밀번호를
+등록합니다. 첫 번째 계정은 기존 `local-user` 업무 기록을 그대로 인계받는 owner가
+되고, 이후 계정은 Project·Work Item·Activity·대화·보고서가 완전히 분리됩니다.
+필요한 계정을 모두 만든 뒤에는 `.env`에 `AUTH_ALLOW_REGISTRATION=false`를 설정하고
+Backend를 다시 시작하는 편이 안전합니다.
+
+가입 직후 표시되는 복구코드는 DB나 브라우저에 원문으로 저장되지 않으므로 안전한
+비밀 저장소에 별도로 보관합니다. 계정 메뉴에서는 비밀번호 변경, 복구코드 재발급,
+모든 기기 로그아웃을 사용할 수 있습니다. 로그인과 비밀번호 복구는 각각 15분 동안
+5회 실패하면 15분간 제한되며, 이 제한은 Backend를 재시작해도 유지됩니다.
+
+대화 본문은 브라우저 저장소에 복사하지 않습니다. Backend의 Conversation과 Run을
+다시 조회해 새로고침 후 대화를 복원하며, 브라우저에는 사용자별 Conversation ID
+힌트만 남깁니다. Dashboard에서 새 대화를 만들고 기존 대화를 전환할 수 있으며,
+네트워크 재전송으로 빈 대화가 중복 생성되지 않습니다. 로그아웃하거나 DB를
+Restore하면 기존 로그인 세션은 폐기됩니다. Restore된 복구코드도 재사용할 수
+없으므로 비밀번호로 로그인한 뒤 새 코드를 발급합니다.
+
 ## BY 앱으로 설치
 
 Dashboard는 PWA로 설치할 수 있습니다. 먼저 Docker를 실행한 뒤
@@ -31,12 +49,8 @@ Backend의 안전한 Chat 경로로 저장됩니다.
 현재 Backend에는 Desktop UI보다 먼저 검증하는 Phase 2 실행 기반도 포함되어
 있습니다. Skill Registry가 `SKILL.md`를 검증하고, Permission Engine이 읽기 Tool
 권한을 제한하며, Trigger/Event Engine이 업무 상태를 바탕으로 결정론적 제안을
-만듭니다. 제안과 Skill 상태는 다음 API에서 확인할 수 있습니다.
-
-```bash
-curl 'http://127.0.0.1:8100/api/v1/suggestions?limit=3'
-curl 'http://127.0.0.1:8100/api/v1/skills'
-```
+만듭니다. 제안과 Skill 상태는 로그인한 Dashboard에서 확인할 수 있습니다. 해당 API도
+인증 Session이 필요하며 Cookie 값을 명령행이나 문서에 직접 남기지 않습니다.
 
 현재는 `work-capture`와 `calendar-agent`가 단일 순차 Skill Runtime을 사용하며,
 Worker가 Structured Memory나 Google Calendar를 직접 쓰지 않습니다. Calendar 조회는
@@ -99,15 +113,15 @@ EXTRACTION_API_TIMEOUT_SECONDS=60
 그리고 필요하면 `EXTRACTION_MAX_CONCURRENT`(기본 6)와
 `EXTRACTION_CONCURRENCY_WAIT_SECONDS`(기본 10초)를 조정해주세요.
 
-기본 바인딩은 `0.0.0.0`이라 같은 PC/같은 네트워크에서 모두 접근 가능합니다.
-보안을 위해 외부 노출이 필요 없으면 `.env`에서 아래처럼 loopback로 제한할 수 있습니다.
+기본 바인딩은 `127.0.0.1`이라 이 Mac에서만 접근할 수 있습니다. 같은 네트워크의
+다른 기기에서 접근해야 할 때만 `.env`에서 바인딩과 허용 Origin을 명시적으로
+추가하세요. 인터넷에 공개하려면 HTTPS reverse proxy와
+`AUTH_COOKIE_SECURE=true`가 필수입니다.
 
 ```bash
 BACKEND_BIND=127.0.0.1
 DASHBOARD_BIND=127.0.0.1
 ```
-
-또는 브라우저 주소창에서 `localhost`/`127.0.0.1`로 접속하세요.
 
 ### 즉시 연결 점검
 
@@ -122,8 +136,15 @@ cd personal-ai-work-manager
 
 ```bash
 cd personal-ai-work-manager
-API_BASE_URL=http://127.0.0.1:3100 BACKEND_BASE_URL=http://127.0.0.1:8100 ./scripts/verify_chat_connectivity.sh 20 120
+BY_USERNAME='내 아이디' BY_PASSWORD='내 비밀번호' \
+API_BASE_URL=http://127.0.0.1:3100 \
+BACKEND_BASE_URL=http://127.0.0.1:8100 \
+./scripts/verify_chat_connectivity.sh 20 120
 ```
+
+아이디와 비밀번호는 이 명령의 실행 환경에서만 사용되며 저장소나 로그에 기록하지
+마세요. 점검 스크립트는 권한을 `0600`으로 제한한 임시 cookie jar를 사용하고 종료 시
+로그아웃합니다.
 
 결과가 모두 `ok`/`passed`가 아니면 바로 스크린샷/오류 메시지와 함께 공유해 주세요.
 

@@ -8,13 +8,20 @@ import {
 } from "./normalize";
 import type {
   ActivityItem,
+  AuthResponse,
+  AuthUser,
   CalendarResolutionResponse,
+  ConversationListResponse,
+  ConversationCreateResponse,
+  ConversationMessage,
+  ConversationMessagesResponse,
   DashboardSummary,
   JarvisResponse,
   PageResult,
   ProjectDetail,
   ProjectListItem,
   ProviderStatus,
+  RecoveryCodeResponse,
   ReportSnapshot,
 } from "./types";
 
@@ -86,6 +93,8 @@ export const API_BASE_URL = resolvedApiBase();
 const API_BASE_ORIGIN = toOrigin(API_BASE_URL);
 const LOCAL_LOOPBACK_ORIGIN = "http://127.0.0.1:8100";
 
+export const AUTH_REQUIRED_EVENT = "by:auth-required";
+
 function hostOriginCandidates(): string[] {
   const candidates = [API_BASE_ORIGIN];
   if (isBrowser && inferredBase) {
@@ -138,6 +147,9 @@ function buildRequestUrls(rawPath: string): string[] {
   try {
     const explicit = new URL(trimmed);
     const apiPath = `${explicit.pathname}${explicit.search}`;
+    if (isBrowser && explicit.pathname.startsWith("/api/")) {
+      return [`${window.location.origin}${apiPath}`];
+    }
     if (explicit.origin === API_BASE_URL || explicit.origin === "") {
       urls.add(trimmed);
     } else {
@@ -146,9 +158,6 @@ function buildRequestUrls(rawPath: string): string[] {
         urls.add(`${baseOrigin}${apiPath}`);
       }
     }
-    if (isBrowser && explicit.pathname.startsWith("/api/")) {
-      urls.add(explicit.href);
-    }
     return Array.from(urls);
   } catch {
     // not absolute URL
@@ -156,7 +165,10 @@ function buildRequestUrls(rawPath: string): string[] {
 
   const apiPath = resolveApiPath(trimmed);
   if (isBrowser && apiPath.startsWith("/api/")) {
-    urls.add(`${window.location.origin}${apiPath}`);
+    // Authenticated browser traffic always uses the same-origin dashboard
+    // proxy. This keeps the HttpOnly session cookie out of cross-origin
+    // fallback requests.
+    return [`${window.location.origin}${apiPath}`];
   }
   for (const baseOrigin of REQUEST_BASE_ORIGINS) {
     urls.add(`${baseOrigin}${apiPath}`);
@@ -202,6 +214,7 @@ export class ApiError extends Error {
     message: string,
     public readonly status: number,
     public readonly code?: string,
+    public readonly retryAfterSeconds?: number,
   ) {
     super(message);
   }
@@ -246,18 +259,20 @@ async function request(path: string, init?: RequestInit): Promise<unknown> {
     try {
       const timeoutMs = requestTimeoutMs(init ?? {}, isFallback);
       response = await withAbort(
-    (signal) =>
-      fetch(requestUrl, {
-        ...init,
+        (signal) =>
+          fetch(requestUrl, {
+            ...init,
+            credentials: "include",
+            cache: "no-store",
             headers: {
               "Content-Type": "application/json",
               ...init?.headers,
             },
-        signal,
-      }),
-    timeoutMs,
-    init?.signal || undefined,
-  );
+            signal,
+          }),
+        timeoutMs,
+        init?.signal || undefined,
+      );
     } catch (error) {
       lastError = error;
       continue;
@@ -266,7 +281,41 @@ async function request(path: string, init?: RequestInit): Promise<unknown> {
     const body = await parseBody(response);
     if (!response.ok) {
       const problem = errorMessage(body);
-      throw new ApiError(problem.message, response.status, problem.code);
+      const requestPathname = (() => {
+        try {
+          return new URL(requestUrl).pathname;
+        } catch {
+          return "";
+        }
+      })();
+      const isCredentialEntry =
+        requestPathname.endsWith("/auth/login") ||
+        requestPathname.endsWith("/auth/register") ||
+        requestPathname.endsWith("/auth/password/reset");
+      const isRejectedCredential = [
+        "INVALID_CREDENTIALS",
+        "INVALID_RECOVERY_CODE",
+      ].includes(problem.code || "");
+      if (
+        response.status === 401 &&
+        isBrowser &&
+        !isCredentialEntry &&
+        !isRejectedCredential
+      ) {
+        window.dispatchEvent(new CustomEvent(AUTH_REQUIRED_EVENT));
+      }
+      const retryAfterHeader = response.headers.get("Retry-After");
+      const retryAfterSeconds = retryAfterHeader
+        ? Number.parseInt(retryAfterHeader, 10)
+        : undefined;
+      throw new ApiError(
+        problem.message,
+        response.status,
+        problem.code,
+        typeof retryAfterSeconds === "number" && Number.isFinite(retryAfterSeconds)
+          ? retryAfterSeconds
+          : undefined,
+      );
     }
     return body;
   }
@@ -289,6 +338,141 @@ async function request(path: string, init?: RequestInit): Promise<unknown> {
   }
 
   throw new ApiError("BY 서버에 연결할 수 없습니다.", 0, "NETWORK_ERROR");
+}
+
+export async function getCurrentUser(): Promise<AuthUser> {
+  const body = (await request("/api/v1/auth/me")) as AuthResponse;
+  return body.user;
+}
+
+export async function login(input: {
+  username: string;
+  password: string;
+}): Promise<AuthUser> {
+  const body = (await request("/api/v1/auth/login", {
+    method: "POST",
+    body: JSON.stringify(input),
+  })) as AuthResponse;
+  return body.user;
+}
+
+export async function register(input: {
+  username: string;
+  password: string;
+  displayName?: string;
+}): Promise<AuthResponse> {
+  return (await request("/api/v1/auth/register", {
+    method: "POST",
+    body: JSON.stringify({
+      username: input.username,
+      password: input.password,
+      display_name: input.displayName?.trim() || null,
+    }),
+  })) as AuthResponse;
+}
+
+export async function logout(): Promise<void> {
+  await request("/api/v1/auth/logout", { method: "POST" });
+}
+
+export async function changePassword(input: {
+  currentPassword: string;
+  newPassword: string;
+}): Promise<AuthResponse> {
+  return (await request("/api/v1/auth/password/change", {
+    method: "POST",
+    body: JSON.stringify({
+      current_password: input.currentPassword,
+      new_password: input.newPassword,
+    }),
+  })) as AuthResponse;
+}
+
+export async function resetPassword(input: {
+  username: string;
+  recoveryCode: string;
+  newPassword: string;
+}): Promise<RecoveryCodeResponse> {
+  return (await request("/api/v1/auth/password/reset", {
+    method: "POST",
+    body: JSON.stringify({
+      username: input.username,
+      recovery_code: input.recoveryCode,
+      new_password: input.newPassword,
+    }),
+  })) as RecoveryCodeResponse;
+}
+
+export async function rotateRecoveryCode(input: {
+  currentPassword: string;
+}): Promise<RecoveryCodeResponse> {
+  return (await request("/api/v1/auth/recovery-code/rotate", {
+    method: "POST",
+    body: JSON.stringify({ current_password: input.currentPassword }),
+  })) as RecoveryCodeResponse;
+}
+
+export async function logoutAll(): Promise<void> {
+  await request("/api/v1/auth/logout-all", { method: "POST" });
+}
+
+export async function getConversations(
+  limit = 30,
+  offset = 0,
+): Promise<ConversationListResponse> {
+  return (await request(
+    `/api/v1/chat/conversations?limit=${limit}&offset=${offset}`,
+  )) as ConversationListResponse;
+}
+
+export async function createConversation(input: {
+  idempotencyKey: string;
+  title?: string;
+}): Promise<ConversationCreateResponse> {
+  return (await request("/api/v1/chat/conversations", {
+    method: "POST",
+    headers: { "Idempotency-Key": input.idempotencyKey },
+    body: JSON.stringify({ title: input.title?.trim() || null }),
+  })) as ConversationCreateResponse;
+}
+
+export async function getConversationMessages(
+  conversationId: string,
+  limit = 100,
+  beforeSequence?: number,
+): Promise<ConversationMessagesResponse> {
+  const before =
+    typeof beforeSequence === "number"
+      ? `&before_sequence=${encodeURIComponent(beforeSequence)}`
+      : "";
+  return (await request(
+    `/api/v1/chat/conversations/${encodeURIComponent(conversationId)}/messages?limit=${limit}${before}`,
+  )) as ConversationMessagesResponse;
+}
+
+export async function getConversationHistory(
+  conversationId: string,
+  maxMessages = 500,
+): Promise<ConversationMessage[]> {
+  const messages: ConversationMessage[] = [];
+  let beforeSequence: number | undefined;
+
+  while (messages.length < maxMessages) {
+    const page = await getConversationMessages(
+      conversationId,
+      Math.min(100, maxMessages - messages.length),
+      beforeSequence,
+    );
+    messages.push(...page.items);
+    if (!page.has_more || page.items.length === 0) break;
+    const nextBefore = Math.min(
+      ...page.items.map((message) => message.server_sequence),
+    );
+    if (nextBefore === beforeSequence) break;
+    beforeSequence = nextBefore;
+  }
+
+  return messages;
 }
 
 export async function getSummary(): Promise<DashboardSummary> {
@@ -344,6 +528,7 @@ export async function createChatRun(input: {
   content: string;
   conversationId?: string | null;
   clientMessageId: string;
+  signal?: AbortSignal;
 }): Promise<ChatRunResult> {
   const requestPayload = JSON.stringify({
     conversation_id: input.conversationId || null,
@@ -354,7 +539,7 @@ export async function createChatRun(input: {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: requestPayload,
-    signal: undefined,
+    signal: input.signal,
   })) as Record<string, unknown>;
 
   const isInProgressResponse =

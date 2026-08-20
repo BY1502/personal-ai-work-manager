@@ -220,6 +220,14 @@ class WorkRepository:
                     now,
                 ),
             )
+            connection.execute(
+                """
+                UPDATE conversations
+                SET updated_at = ?, version = version + 1
+                WHERE id = ? AND user_id = ?
+                """,
+                (now, resolved_conversation_id, user_id),
+            )
             self._append_event(
                 connection,
                 user_id=user_id,
@@ -791,6 +799,14 @@ class WorkRepository:
                     run_id,
                     user_id,
                 ),
+            )
+            connection.execute(
+                """
+                UPDATE conversations
+                SET updated_at = ?, version = version + 1
+                WHERE id = ? AND user_id = ?
+                """,
+                (now, response.conversation_id, user_id),
             )
             self._append_event(
                 connection,

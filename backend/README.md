@@ -53,6 +53,35 @@ cp .env.example .env
 환경 변수는 실행 Shell에서 export하거나 `.env` 내용을 별도로 로드해야 합니다.
 애플리케이션 자체가 `.env` 파일을 자동으로 읽지는 않습니다.
 
+## 로그인과 사용자 격리
+
+운영 기본값은 `AUTH_REQUIRED=true`입니다. 비밀번호는 사용자별 salt가 있는 scrypt
+credential로 저장하고, 브라우저에는 `HttpOnly · SameSite=Lax` 세션 쿠키만
+발급합니다. SQLite에는 원본 세션 토큰이 아닌 SHA-256 digest만 저장합니다.
+
+- `POST /api/v1/auth/register`: 계정 생성. 첫 계정은 기존 `local-user` 데이터를 인계
+- `POST /api/v1/auth/login`: 새 opaque session 발급
+- `POST /api/v1/auth/logout`: 현재 session 폐기
+- `POST /api/v1/auth/logout-all`: 현재 사용자의 모든 session 폐기
+- `POST /api/v1/auth/password/change`: 현재 비밀번호 재확인 후 비밀번호·복구코드 교체
+- `POST /api/v1/auth/password/reset`: 로그인할 수 없을 때 일회용 복구코드로 재설정
+- `POST /api/v1/auth/recovery-code/rotate`: 현재 비밀번호 재확인 후 복구코드 재발급
+- `GET /api/v1/auth/me`: 현재 사용자 확인
+- `POST /api/v1/chat/conversations`: `Idempotency-Key` 기반 새 대화 생성
+- `GET /api/v1/chat/conversations`: 로그인 사용자의 대화 목록
+- `GET /api/v1/chat/conversations/{id}/messages`: 저장된 Run 결과를 포함한 대화 복원
+
+등록·비밀번호 변경·비밀번호 재설정 응답의 `recovery_code`는 그 응답에서만
+확인할 수 있습니다. DB에는 정규화한 코드의 digest만 저장하며, 재설정이 성공하면
+기존 세션 전체와 기존 복구코드가 즉시 무효화됩니다. 로그인과 복구 시도는 서로
+분리된 익명 identifier digest를 SQLite에 기록해 각각 15분 동안 5회 실패하면
+15분간 `429`로 제한합니다. 사용자명이나 IP 원문은 제한 테이블에 저장하지 않습니다.
+
+각 요청은 로그인 사용자의 ID로 새 `JarvisOrchestrator` facade를 구성합니다. 따라서
+동시에 요청한 두 사용자가 singleton 상태를 공유하지 않으며, Run·Clarification·
+Project·Activity·Report 조회도 소유권 조건을 통과해야 합니다. 현재 Google OAuth
+자격증명은 프로세스 전역이므로 첫 owner 계정만 Calendar 기능을 사용할 수 있습니다.
+
 운영 기본값은 Local Ollama `qwen3.5:35b-a3b-q4_K_M`입니다. 하나의 Backend
 프로세스는 업무 추출, Skill 실행, 추천 설명, 보고서 요약에 같은 Provider와 모델을
 공유합니다. `jarvis-reasoning`, `worker-balanced`, `worker-fast`는 SKILL.md와 실행
@@ -204,8 +233,8 @@ API Provider는 자격증명이 없어 HTTP contract까지만 자동 검증했�
 추천 API는 내부 점수와 score breakdown을 반환하지 않습니다. Provider 상태는 모델명과
 사용자용 상태만 반환하며 endpoint, 환경 변수, API key를 노출하지 않습니다.
 
-Dashboard CORS 기본 allowlist는 localhost/127.0.0.1의 3000·3001 포트와 배포된
-비공개 JARVIS Dashboard 주소입니다. 다른 Origin은
+Dashboard CORS 기본 allowlist는 localhost/127.0.0.1의 3000·3001·3100 포트입니다.
+다른 Origin은
 `DASHBOARD_ALLOWED_ORIGINS`에 쉼표로 구분해 명시적으로 추가합니다.
 
 ### TTS 경계
@@ -218,7 +247,7 @@ Canonical Memory를 유지합니다. 모델 파일은 named volume으로 다운�
 Piper로 음성 합성만 한 번 대체합니다. Run은 TTS보다 먼저 완료되므로 합성 중 재시작도
 Canonical 작업 재적용을 유발하지 않습니다.
 
-현재 전체 Backend Suite는 54개 테스트입니다.
+현재 전체 Backend Suite는 84개 테스트입니다.
 
 ## 주요 문서
 

@@ -40,13 +40,18 @@ services:
       TTS_FALLBACK_MODEL_NAME: ${TTS_FALLBACK_MODEL_NAME:-ko_KR-kss-medium}
       TTS_FALLBACK_TIMEOUT_SECONDS: ${TTS_FALLBACK_TIMEOUT_SECONDS:-30}
       PERSONAL_AI_DB_PATH: /app/data/personal_ai.db
+      AUTH_REQUIRED: ${AUTH_REQUIRED:-true}
+      AUTH_ALLOW_REGISTRATION: ${AUTH_ALLOW_REGISTRATION:-true}
+      AUTH_SESSION_TTL_SECONDS: ${AUTH_SESSION_TTL_SECONDS:-2592000}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
       DASHBOARD_ALLOWED_ORIGINS: ${DASHBOARD_ALLOWED_ORIGINS:-http://localhost:3100,http://127.0.0.1:3100,http://localhost:3001,http://127.0.0.1:3001,http://localhost:3000,http://127.0.0.1:3000}
+      DASHBOARD_ALLOWED_ORIGIN_REGEX: ${DASHBOARD_ALLOWED_ORIGIN_REGEX:-}
     extra_hosts:
       - host.docker.internal:host-gateway
     volumes:
       - ./backend/data:/app/data
     ports:
-      - ${BACKEND_BIND:-0.0.0.0}:${BACKEND_PORT:-8100}:8000
+      - ${BACKEND_BIND:-127.0.0.1}:${BACKEND_PORT:-8100}:8000
     healthcheck:
       test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
       interval: 10s
@@ -69,7 +74,7 @@ services:
       - piper_models:/models
       - piper_audio:/data/audio
     ports:
-      - ${TTS_BIND:-0.0.0.0}:${TTS_PORT:-8766}:8765
+      - ${TTS_BIND:-127.0.0.1}:${TTS_PORT:-8766}:8765
     healthcheck:
       test: [CMD, python, -c, "import urllib.request,sys; r=urllib.request.urlopen('http://127.0.0.1:8765/api/health', timeout=2); sys.exit(0 if r.status == 200 else 1)"]
       interval: 10s
@@ -91,8 +96,8 @@ services:
       backend:
         condition: service_healthy
     ports:
-      - ${DASHBOARD_BIND:-0.0.0.0}:${DASHBOARD_PORT:-3100}:3000
-      - ${DASHBOARD_BIND:-0.0.0.0}:3001:3000
+      - ${DASHBOARD_BIND:-127.0.0.1}:${DASHBOARD_PORT:-3100}:3000
+      - ${DASHBOARD_BIND:-127.0.0.1}:3001:3000
     healthcheck:
       test: [CMD, node, -e, "fetch('http://127.0.0.1:3000').then(r => { if (!r.ok) process.exit(1) }).catch(() => process.exit(1))"]
       interval: 10s

@@ -271,14 +271,15 @@ class DashboardReadService:
             "recent_activities": activities,
         }
 
-    def provider_status(self) -> dict[str, Any]:
+    def provider_status(self, *, user_id: str) -> dict[str, Any]:
         provider_name = str(
             getattr(self.extractor, "provider_name", "unknown")
         ).casefold()
         model_name = getattr(self.extractor, "model_name", None)
         checked_at = utc_iso(self.database.clock.now_utc())
         if provider_name in {"local", "api"} and self._provider_run_is_loading(
-            provider_name
+            user_id,
+            provider_name,
         ):
             status = "LOADING"
             message = (
@@ -322,7 +323,7 @@ class DashboardReadService:
             "checked_at": checked_at,
         }
 
-    def _provider_run_is_loading(self, provider_name: str) -> bool:
+    def _provider_run_is_loading(self, user_id: str, provider_name: str) -> bool:
         connection = self.database.connect()
         try:
             row = connection.execute(
@@ -335,7 +336,7 @@ class DashboardReadService:
                   AND status IN ('RECEIVED', 'INTERPRETING')
                 LIMIT 1
                 """,
-                (self.database.default_user_id, provider_name),
+                (user_id, provider_name),
             ).fetchone()
             return row is not None
         finally:
