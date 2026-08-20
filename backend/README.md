@@ -59,6 +59,22 @@ EXTRACTION_PROVIDER=local
 
 자동 테스트는 `EXTRACTION_PROVIDER=deterministic`을 명시해 외부 모델에 의존하지 않습니다.
 
+### Local 모델 A/B 검증
+
+모델을 교체하기 전에는 실제 사용자 DB와 분리된 합성 한국어 회귀 세트로
+구조화 정확도와 지연시간을 비교합니다. 아래 스크립트는 DB를 열거나 수정하지 않고,
+모델 출력이 기존 Pydantic Schema와 deterministic validator를 통과한 뒤의 의미만
+평가합니다.
+
+```bash
+cd backend
+.venv/bin/python scripts/benchmark_extraction_models.py \
+  qwen3:4b qwen3.5:35b-a3b-q4_K_M
+```
+
+결과에는 전체 사례 통과 수, semantic check rate, 평균/P95 지연시간과 실패한
+case ID만 포함됩니다. 실제 업무 원문이나 Canonical Memory는 평가 로그에 넣지 않습니다.
+
 ## SQLite Backup / Restore
 
 실행 중 백업은 SQLite Online Backup API로 수행하고, Restore는 Backend를 중지한
